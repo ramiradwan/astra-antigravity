@@ -235,6 +235,55 @@ class FirstUseTests(unittest.TestCase):
                         first_use.captured(["fixture-command"], {})
             self.assertEqual(output.getvalue(), "")
 
+    def test_observer_start_failure_is_preserved_before_install_even_if_close_fails(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            temporary = Path(directory)
+            node = temporary / "node.exe"
+            node.touch()
+            npx = temporary / "node_modules/npm/bin/npx-cli.js"
+            npx.parent.mkdir(parents=True)
+            npx.touch()
+            observer = first_use.Observation({})
+            observer.ready.set()
+            observer.records = [{"windows_sample_ready": True}, {"name": "PRIVATE_FIXTURE", "PRIVATE_FIXTURE": True}]
+            observer.start = Mock(side_effect=first_use.CheckFailed("observation_sample_ready"))
+            observer.verify = Mock(side_effect=first_use.CheckFailed("expected_processes_only"))
+            observer.close = Mock(side_effect=RuntimeError("PRIVATE_FIXTURE"))
+            mocks = {"json_file": Mock(side_effect=[self.pins, {}]), "runner_environment_guard": Mock(), "runner_guard": Mock(),
+                     "paths": Mock(return_value=(temporary / "install", temporary / "state", temporary / "shortcut")),
+                     "fresh_preflight": Mock(), "download": Mock(return_value=b"fixture"), "validate_package": Mock(),
+                     "validate_manifest": Mock(), "child_environment": Mock(return_value={"PATH": "fixture"}),
+                     "captured": Mock(return_value=b"v24.0.0"), "Observation": Mock(return_value=observer), "cleanup": Mock()}
+            for key, value in mocks.items():
+                stack.enter_context(patch.object(first_use, key, value))
+            stack.enter_context(patch.object(first_use.shutil, "which", return_value=str(node)))
+            stack.enter_context(patch.dict(first_use.os.environ, {"RUNNER_TEMP": str(temporary), "GITHUB_EVENT_PATH": "fixture"}))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(first_use.main(), 1)
+            result = json.loads(output.getvalue())
+            self.assertIs(result["observation_sample_ready"], False)
+            self.assertIs(result["process_trace_ready"], True)
+            self.assertIs(result["windows_sample_ready"], True)
+            self.assertIs(result["tcp_sample_ready"], False)
+            self.assertIs(result["observation_sample_available"], False)
+            self.assertIs(result["observation_closed"], False)
+            self.assertNotIn("expected_processes_only", result)
+            self.assertNotIn("PRIVATE_FIXTURE", output.getvalue())
+            observer.verify.assert_not_called()
+            mocks["cleanup"].assert_not_called()
+            mocks["captured"].assert_called_once()  # node version only; no npx
+
+    def test_observer_first_sample_timeout_has_a_specific_safe_check(self):
+        observer = first_use.Observation({"SYSTEMROOT": "fixture"})
+        observer.ready.set()
+        observer.records = [{"windows_sample_ready": True}]
+        with patch.object(first_use.subprocess, "Popen", return_value=Mock()), patch.object(first_use.threading, "Thread") as thread, \
+             patch.object(first_use, "wait_for", side_effect=first_use.CheckFailed("bounded_state_wait")):
+            with self.assertRaisesRegex(first_use.CheckFailed, "^observation_sample_ready$"):
+                observer.start()
+        thread.return_value.start.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

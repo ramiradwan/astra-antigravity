@@ -41,6 +41,8 @@ APP_ID = "AstraAntigravityCompanion"
 HASH = re.compile(r"[a-f0-9]{64}")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 MAX_OUTPUT = 262_144
+MONITOR_DIAGNOSTICS = ("windows_sample_ready", "tcp_sample_ready", "udp_sample_ready",
+                       "monitor_permission_denied", "monitor_command_unavailable", "monitor_cim_error", "monitor_other_error")
 
 
 class CheckFailed(Exception):
@@ -217,6 +219,7 @@ $ErrorActionPreference = 'Stop'
 try {
   Register-CimIndicationEvent -Query 'SELECT * FROM Win32_ProcessStartTrace' -SourceIdentifier 'BootstrapProcessTrace' | Out-Null
   [Console]::Out.WriteLine('{"ready":true}')
+  $first = $true
   $until = [DateTime]::UtcNow.AddSeconds(480)
   while ([DateTime]::UtcNow -lt $until) {
     foreach ($event in @(Get-Event -SourceIdentifier 'BootstrapProcessTrace' -ErrorAction SilentlyContinue)) {
@@ -226,12 +229,27 @@ try {
     }
     $processes = @(Get-Process)
     $windows = @($processes | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { $_.Id })
+    if ($first) { [Console]::Out.WriteLine('{"windows_sample_ready":true}') }
     $tcp = @(Get-NetTCPConnection -State Listen | ForEach-Object { $_.OwningProcess })
+    if ($first) { [Console]::Out.WriteLine('{"tcp_sample_ready":true}') }
     $udp = @(Get-NetUDPEndpoint | ForEach-Object { $_.OwningProcess })
+    if ($first) { [Console]::Out.WriteLine('{"udp_sample_ready":true}') }
     [Console]::Out.WriteLine((@{sample=$true; windows=$windows; listeners=@($tcp + $udp); running=@($processes | ForEach-Object { $_.Id })} | ConvertTo-Json -Compress))
+    $first = $false
     Start-Sleep -Milliseconds 200
   }
-} catch { [Console]::Out.WriteLine('{"error":true}') }
+} catch {
+  # Map runtime errors to a strict set of booleans. Never emit the exception,
+  # message, target object, module name, stack, path or command text.
+  $kind = $_.Exception.GetType().FullName
+  if ($_.CategoryInfo.Category -eq 'PermissionDenied' -or $kind -eq 'System.UnauthorizedAccessException') {
+    [Console]::Out.WriteLine('{"error":true,"monitor_permission_denied":true}')
+  } elseif ($kind -eq 'System.Management.Automation.CommandNotFoundException') {
+    [Console]::Out.WriteLine('{"error":true,"monitor_command_unavailable":true}')
+  } elseif ($kind -eq 'Microsoft.Management.Infrastructure.CimException') {
+    [Console]::Out.WriteLine('{"error":true,"monitor_cim_error":true}')
+  } else { [Console]::Out.WriteLine('{"error":true,"monitor_other_error":true}') }
+}
 """
 
 
@@ -252,8 +270,21 @@ class Observation:
         self.reader.start()
         require(self.ready.wait(25) and not self.failed, "process_trace_ready")
         # Require a successful listener/window sample as well as trace startup.
-        wait_for(lambda: any(record.get("sample") for record in self.records) or self.failed, 25)
+        try:
+            wait_for(lambda: self.has_sample() or self.failed, 25)
+        except CheckFailed:
+            raise CheckFailed("observation_sample_ready") from None
         require(not self.failed and any(record.get("sample") for record in self.records), "observation_ready")
+
+    def has_sample(self):
+        return any(record.get("sample") is True for record in self.records)
+
+    def diagnostics(self, report):
+        # Only explicitly allowlisted boolean fields cross the logging boundary.
+        report["process_trace_ready"] = self.ready.is_set()
+        report["observation_sample_available"] = self.has_sample()
+        for key in MONITOR_DIAGNOSTICS:
+            report[key] = any(record.get(key) is True for record in self.records)
 
     def _read(self):
         try:
@@ -454,9 +485,12 @@ def verify(report):
         require(re.fullmatch(r"v24\.[0-9]+\.[0-9]+", node_version) is not None, "node_version")
         report["node_version"] = node_version
         observer = Observation(environment)
+        observer_started = False
         install_attempted = False
+        primary_failed = False
         try:
             observer.start()
+            observer_started = True
             install_attempted = True
             captured([node, npx, "--yes", "--package", tarball, "delegate-to-antigravity", "setup"], environment, timeout=180)
             report["npx_setup_exited"] = True
@@ -475,6 +509,13 @@ def verify(report):
                 require(registry_value(RUN, APP_ID) is None, "startup_off")
                 time.sleep(.5)
             report["startup_off"] = True
+        except CheckFailed as error:
+            report[str(error)] = False
+            primary_failed = True
+            raise
+        except Exception:
+            primary_failed = True
+            raise
         finally:
             try:
                 if install_attempted:
@@ -485,9 +526,25 @@ def verify(report):
                     except Exception:
                         report["supported_stop_and_uninstall"] = False
                         raise
-                observer.verify(report)
+                if observer_started:
+                    require(observer.has_sample(), "observation_available")
+                    observer.verify(report)
+            except CheckFailed as error:
+                report[str(error)] = False
+                if not primary_failed:
+                    raise
+            except Exception:
+                report["observation_finalization_failed"] = True
+                if not primary_failed:
+                    raise
             finally:
-                observer.close()
+                observer.diagnostics(report)
+                try:
+                    observer.close()
+                except Exception:
+                    report["observation_closed"] = False
+                    if not primary_failed:
+                        raise CheckFailed("observation_closed") from None
 
 
 def main():
