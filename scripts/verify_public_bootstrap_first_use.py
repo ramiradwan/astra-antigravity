@@ -357,7 +357,9 @@ class NativeWindowsSnapshots:
 
 
 class Observation:
-    def __init__(self, _environment=None):
+    def __init__(self, _environment=None, *, installer_sha256=None):
+        require(installer_sha256 is None or type(installer_sha256) is str and HASH.fullmatch(installer_sha256), "pinned_installer_identity")
+        self.installer_name = installer_sha256 + ".exe" if installer_sha256 else None
         self.records = []
         self.ready = threading.Event()
         self.started = threading.Event()
@@ -440,15 +442,32 @@ class Observation:
         owned = descendants(records, os.getpid())
         names = [record["name"].casefold() for record in records if record.get("pid") in owned]
         providers = re.compile(r"(?:codex|agy|antigravity|claude|gemini|python|python3)(?:\.exe)?", re.I)
-        require(not any(providers.fullmatch(name) for name in names), "no_provider_process_observed")
-        allowed = re.compile(r"(?:node|cmd|conhost|powershell|taskkill|astraantigravity|maintenance-helper-[a-f0-9]{16})\.exe")
-        require(bool(names) and all(allowed.fullmatch(name) for name in names), "expected_processes_only")
+        # bootstrap.mjs launches bootstrap/<signed installer SHA256>.exe.
+        # Permit that exact reviewed pin, never an arbitrary hash-named EXE.
+        categories = {
+            "npm_runtime_name_observed": r"(?:node|cmd)\.exe",
+            "console_host_name_observed": r"conhost\.exe",
+            "installed_companion_name_observed": r"astraantigravity\.exe",
+            "maintenance_helper_name_observed": r"maintenance-helper-[a-f0-9]{16}\.exe",
+            "maintenance_shell_name_observed": r"powershell\.exe",
+            "timeout_cleanup_name_observed": r"taskkill\.exe",
+        }
+        allowed = re.compile("(?:" + "|".join(categories.values()) + ")")
+        unknown = any(not allowed.fullmatch(name) and name != self.installer_name for name in names)
+        report.update({key: any(re.fullmatch(pattern, name) for name in names) for key, pattern in categories.items()})
+        report["pinned_installer_name_observed"] = self.installer_name is not None and self.installer_name in names
+        report["unknown_owned_executable_observed"] = unknown
         samples = [record for record in records if record.get("sample")]
-        require(len(samples) >= 3, "observation_samples")
-        require(not any(owned.intersection(sample.get("windows", [])) for sample in samples), "no_window_observed")
-        require(not any(owned.intersection(sample.get("listeners", [])) for sample in samples), "no_listener_observed")
-        for key in ("expected_processes_only", "no_provider_process_observed", "no_window_observed", "no_listener_observed"):
-            report[key] = True
+        checks = {
+            "no_provider_process_observed": not any(providers.fullmatch(name) for name in names),
+            "expected_processes_only": bool(names) and not unknown,
+            "observation_samples": len(samples) >= 3,
+            "no_window_observed": bool(samples) and not any(owned.intersection(sample.get("windows", [])) for sample in samples),
+            "no_listener_observed": bool(samples) and not any(owned.intersection(sample.get("listeners", [])) for sample in samples),
+        }
+        # Preserve every independent result before one fixed aggregate failure.
+        report.update(checks)
+        require(all(checks.values()), "supplementary_observation_checks")
 
     def wait_stopped(self):
         with self.lock:
@@ -620,7 +639,7 @@ def verify(report):
         node_version = captured([node, "--version"], environment).decode().strip()
         require(re.fullmatch(r"v24\.[0-9]+\.[0-9]+", node_version) is not None, "node_version")
         report["node_version"] = node_version
-        observer = Observation(environment)
+        observer = Observation(environment, installer_sha256=pins["installer_sha256"])
         observer_started = False
         install_attempted = False
         primary_failed = False

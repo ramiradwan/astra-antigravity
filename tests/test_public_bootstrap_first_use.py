@@ -185,8 +185,10 @@ class FirstUseTests(unittest.TestCase):
         observer.stopped.set()
         observer.records = [{"pid": 2, "parent": first_use.os.getpid(), "name": "node.exe"},
                             {"pid": 3, "parent": 2, "name": "codex.exe"}]
-        with self.assertRaisesRegex(first_use.CheckFailed, "no_provider_process_observed"):
-            observer.verify({})
+        report = {}
+        with self.assertRaisesRegex(first_use.CheckFailed, "supplementary_observation_checks"):
+            observer.verify(report)
+        self.assertIs(report["no_provider_process_observed"], False)
 
     def test_snapshots_flag_owned_windows_and_listeners(self):
         for key, check in (("windows", "no_window_observed"), ("listeners", "no_listener_observed")):
@@ -196,8 +198,13 @@ class FirstUseTests(unittest.TestCase):
             observer.stopped.set()
             observer.records = [{"pid": 2, "parent": first_use.os.getpid(), "name": "AstraAntigravity.exe"}]
             observer.records += [{"sample": True, "windows": [], "listeners": [], key: [2]}] * 3
-            with self.assertRaisesRegex(first_use.CheckFailed, check):
-                observer.verify({})
+            report = {}
+            with self.assertRaisesRegex(first_use.CheckFailed, "supplementary_observation_checks"):
+                observer.verify(report)
+            self.assertIs(report[check], False)
+            self.assertIn("no_provider_process_observed", report)
+            self.assertIn("no_window_observed", report)
+            self.assertIn("no_listener_observed", report)
 
     def test_cleanup_uses_stop_then_uninstall_and_never_status_after_removal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -362,8 +369,34 @@ class FirstUseTests(unittest.TestCase):
         with self.assertRaisesRegex(first_use.CheckFailed, "observation_healthy"):
             observer.verify({})
         observer.close()
-        with self.assertRaisesRegex(first_use.CheckFailed, "no_provider_process_observed"):
-            observer.verify({})
+        report = {}
+        with self.assertRaisesRegex(first_use.CheckFailed, "supplementary_observation_checks"):
+            observer.verify(report)
+        self.assertIs(report["no_provider_process_observed"], False)
+
+    def test_only_exact_pinned_installer_cache_name_is_allowed(self):
+        digest = self.pins["installer_sha256"]
+        for name, accepted in ((digest + ".exe", True), ("b" * 64 + ".exe", False), ("PRIVATE_FIXTURE.exe", False)):
+            observer = first_use.Observation(installer_sha256=digest)
+            observer.reader = Mock()
+            observer.reader.is_alive.return_value = False
+            observer.stopped.set()
+            observer.records = [{"pid": 2, "parent": first_use.os.getpid(), "name": name}]
+            observer.records += [{"sample": True, "windows": [], "listeners": [], "running": []}] * 3
+            report = {}
+            if accepted:
+                observer.verify(report)
+            else:
+                with self.assertRaisesRegex(first_use.CheckFailed, "supplementary_observation_checks"):
+                    observer.verify(report)
+            self.assertIs(report["pinned_installer_name_observed"], accepted)
+            self.assertIs(report["expected_processes_only"], accepted)
+            self.assertIs(report["unknown_owned_executable_observed"], not accepted)
+            self.assertIs(report["no_provider_process_observed"], True)
+            self.assertIs(report["no_window_observed"], True)
+            self.assertIs(report["no_listener_observed"], True)
+            self.assertTrue(all(type(value) is bool for value in report.values()))
+            self.assertNotIn("PRIVATE_FIXTURE", json.dumps(report))
 
     def test_native_layouts_and_owner_table_parsers(self):
         self.assertEqual(ctypes.sizeof(first_use.ProcessEntry32W), 568 if ctypes.sizeof(ctypes.c_void_p) == 8 else 556)
