@@ -2,6 +2,7 @@
 import base64
 import contextlib
 import copy
+import ctypes
 import io
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 import urllib.error
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -173,23 +175,25 @@ class FirstUseTests(unittest.TestCase):
             with self.assertRaisesRegex(first_use.CheckFailed, "fresh_heartbeat"):
                 first_use.verify_pending(state, self.pins, now=16000)
 
-    def test_windows_trace_detects_short_lived_provider_and_nested_children(self):
+    def test_snapshots_detect_observed_owned_provider_and_nested_children(self):
         records = [{"pid": 3, "parent": 2, "name": "codex.exe"}, {"pid": 2, "parent": 1, "name": "node.exe"},
                    {"pid": 4, "parent": 999, "name": "other.exe"}]
         self.assertEqual(first_use.descendants(records, 1), {2, 3})
         observer = first_use.Observation({})
-        observer.process = Mock()
-        observer.process.poll.return_value = None
+        observer.reader = Mock()
+        observer.reader.is_alive.return_value = False
+        observer.stopped.set()
         observer.records = [{"pid": 2, "parent": first_use.os.getpid(), "name": "node.exe"},
                             {"pid": 3, "parent": 2, "name": "codex.exe"}]
-        with self.assertRaisesRegex(first_use.CheckFailed, "expected_processes_only"):
+        with self.assertRaisesRegex(first_use.CheckFailed, "no_provider_process_observed"):
             observer.verify({})
 
-    def test_windows_trace_flags_owned_windows_and_listeners(self):
+    def test_snapshots_flag_owned_windows_and_listeners(self):
         for key, check in (("windows", "no_window_observed"), ("listeners", "no_listener_observed")):
             observer = first_use.Observation({})
-            observer.process = Mock()
-            observer.process.poll.return_value = None
+            observer.reader = Mock()
+            observer.reader.is_alive.return_value = False
+            observer.stopped.set()
             observer.records = [{"pid": 2, "parent": first_use.os.getpid(), "name": "AstraAntigravity.exe"}]
             observer.records += [{"sample": True, "windows": [], "listeners": [], key: [2]}] * 3
             with self.assertRaisesRegex(first_use.CheckFailed, check):
@@ -244,8 +248,9 @@ class FirstUseTests(unittest.TestCase):
             npx.parent.mkdir(parents=True)
             npx.touch()
             observer = first_use.Observation({})
-            observer.ready.set()
-            observer.records = [{"windows_sample_ready": True}, {"name": "PRIVATE_FIXTURE", "PRIVATE_FIXTURE": True}]
+            observer.started.set()
+            observer.api = SimpleNamespace(windows_ready=True, tcp_ready=False, udp_ready=False)
+            observer.records = [{"name": "PRIVATE_FIXTURE", "PRIVATE_FIXTURE": True}]
             observer.start = Mock(side_effect=first_use.CheckFailed("observation_sample_ready"))
             observer.verify = Mock(side_effect=first_use.CheckFailed("expected_processes_only"))
             observer.close = Mock(side_effect=RuntimeError("PRIVATE_FIXTURE"))
@@ -263,7 +268,9 @@ class FirstUseTests(unittest.TestCase):
                 self.assertEqual(first_use.main(), 1)
             result = json.loads(output.getvalue())
             self.assertIs(result["observation_sample_ready"], False)
-            self.assertIs(result["process_trace_ready"], True)
+            self.assertIs(result["process_snapshots_used"], False)
+            self.assertIs(result["process_start_trace_used"], False)
+            self.assertIs(result["sampling_can_miss_short_lived_activity"], True)
             self.assertIs(result["windows_sample_ready"], True)
             self.assertIs(result["tcp_sample_ready"], False)
             self.assertIs(result["observation_sample_available"], False)
@@ -275,26 +282,19 @@ class FirstUseTests(unittest.TestCase):
             mocks["captured"].assert_called_once()  # node version only; no npx
 
     def test_observer_first_sample_timeout_has_a_specific_safe_check(self):
-        observer = first_use.Observation({"SYSTEMROOT": "fixture"})
-        observer.ready.set()
-        observer.records = [{"windows_sample_ready": True}]
-        with patch.object(first_use.subprocess, "Popen", return_value=Mock()) as process, patch.object(first_use.threading, "Thread") as thread, \
-             patch.object(first_use, "wait_for", side_effect=first_use.CheckFailed("bounded_state_wait")):
+        observer = first_use.Observation()
+        with patch.object(first_use.threading, "Thread") as thread, patch.object(observer.ready, "wait", return_value=False):
             with self.assertRaisesRegex(first_use.CheckFailed, "^observation_sample_ready$"):
                 observer.start()
         thread.return_value.start.assert_called_once()
-        arguments = process.call_args.args[0]
-        self.assertEqual(arguments[-2], "-EncodedCommand")
-        self.assertEqual(base64.b64decode(arguments[-1]).decode("utf-16le"), first_use.MONITOR)
-        self.assertNotIn(first_use.MONITOR, arguments)
 
     def test_monitor_diagnostics_expose_only_fixed_boolean_status(self):
         observer = first_use.Observation({})
-        observer.process = Mock()
-        observer.process.poll.return_value = 1
-        observer.records = [{"monitor_started": True, "PRIVATE_FIXTURE": "secret"}]
-        observer.process.stdout.readline.side_effect = [b"not valid JSON PRIVATE_FIXTURE\n"]
-        observer._read()
+        observer.reader = Mock()
+        observer.reader.is_alive.return_value = False
+        observer.records = [{"PRIVATE_FIXTURE": "secret"}]
+        with patch.object(first_use, "NativeWindowsSnapshots", side_effect=RuntimeError("PRIVATE_FIXTURE")):
+            observer._read()
         report = {}
         observer.diagnostics(report)
         self.assertIs(report["monitor_started"], True)
@@ -303,21 +303,142 @@ class FirstUseTests(unittest.TestCase):
         self.assertTrue(all(type(value) is bool for value in report.values()))
         self.assertNotIn("PRIVATE_FIXTURE", json.dumps(report))
 
-    def test_process_start_queue_records_and_samples_keep_the_observer_contract(self):
-        observer = first_use.Observation({})
-        record = {"pid": 123456, "parent": first_use.os.getpid(), "name": "node.exe"}
-        samples = [{"sample": True, "windows": [], "listeners": [], "running": []}] * 3
-        raw = b"\n".join(json.dumps(value).encode() for value in [{"ready": True}, record, *samples]) + b"\n"
-        observer.process = Mock(stdout=io.BytesIO(raw))
-        observer.process.poll.return_value = None
-        observer._read()
-        self.assertTrue(observer.ready.is_set())
+    def test_snapshots_ignore_baseline_and_unrelated_providers(self):
+        observer = first_use.Observation()
+        observer.reader = Mock()
+        observer.reader.is_alive.return_value = False
+        observer.stopped.set()
+        baseline = [{"pid": first_use.os.getpid(), "parent": 999, "name": "python.exe"},
+                    {"pid": 999, "parent": 0, "name": "python.exe"}]
+        snapshot = {"processes": baseline, "windows": {999}, "listeners": {999}}
+        observer._capture(snapshot, baseline=True)
+        later = {**snapshot, "processes": baseline + [{"pid": 123456, "parent": first_use.os.getpid(), "name": "node.exe"},
+                                                     {"pid": 888, "parent": 999, "name": "codex.exe"}]}
+        observer._capture(later)
+        observer._capture(later)
         self.assertTrue(observer.has_sample())
         report = {}
         observer.verify(report)
         self.assertTrue(report["no_provider_process_observed"])
         self.assertTrue(report["no_window_observed"])
         self.assertTrue(report["no_listener_observed"])
+        self.assertFalse(any(record.get("pid") == first_use.os.getpid() for record in observer.records))
+
+    def test_snapshot_ancestry_keeps_an_observed_parent_after_it_exits(self):
+        observer = first_use.Observation()
+        observer._capture({"processes": [], "windows": set(), "listeners": set()}, baseline=True)
+        observer._capture({"processes": [{"pid": 2, "parent": first_use.os.getpid(), "name": "node.exe"}], "windows": set(), "listeners": set()})
+        observer._capture({"processes": [{"pid": 3, "parent": 2, "name": "AstraAntigravity.exe"}], "windows": set(), "listeners": set()})
+        self.assertEqual(first_use.descendants(observer.records, first_use.os.getpid()), {2, 3})
+
+    def test_observer_native_failure_wakes_start_and_late_failure_prevents_success(self):
+        observer = first_use.Observation()
+        with patch.object(first_use, "NativeWindowsSnapshots", side_effect=first_use.CheckFailed("native_tcp_snapshot")):
+            with self.assertRaisesRegex(first_use.CheckFailed, "native_tcp_snapshot"):
+                observer.start()
+        with self.assertRaisesRegex(first_use.CheckFailed, "native_tcp_snapshot"):
+            observer.close()
+        observer = first_use.Observation()
+        observer.reader = Mock()
+        observer.reader.is_alive.return_value = False
+        observer.records = [{"pid": 2, "parent": first_use.os.getpid(), "name": "node.exe"}]
+        observer.records += [{"sample": True, "windows": [], "listeners": [], "running": []}] * 3
+        # A snapshot can fail while close drains the final in-flight sample.
+        def fail_on_join(**_kwargs):
+            observer.failed, observer.failure_check = True, "native_udp_snapshot"
+        observer.reader.join.side_effect = fail_on_join
+        with self.assertRaisesRegex(first_use.CheckFailed, "native_udp_snapshot"):
+            observer.close()
+
+    def test_final_inflight_sample_is_verified_only_after_stop_and_join(self):
+        observer = first_use.Observation()
+        observer.reader = Mock()
+        observer.reader.is_alive.return_value = False
+        observer.records = [{"pid": 2, "parent": first_use.os.getpid(), "name": "node.exe"}]
+        observer.records += [{"sample": True, "windows": [], "listeners": [], "running": []}] * 3
+        def final_sample(**_kwargs):
+            observer.records.append({"pid": 3, "parent": 2, "name": "codex.exe"})
+        observer.reader.join.side_effect = final_sample
+        with self.assertRaisesRegex(first_use.CheckFailed, "observation_healthy"):
+            observer.verify({})
+        observer.close()
+        with self.assertRaisesRegex(first_use.CheckFailed, "no_provider_process_observed"):
+            observer.verify({})
+
+    def test_native_layouts_and_owner_table_parsers(self):
+        self.assertEqual(ctypes.sizeof(first_use.ProcessEntry32W), 568 if ctypes.sizeof(ctypes.c_void_p) == 8 else 556)
+        self.assertEqual(first_use.ProcessEntry32W.name.offset, 44 if ctypes.sizeof(ctypes.c_void_p) == 8 else 36)
+        for row_type, size, pid_offset in ((first_use.Tcp4Row, 24, 20), (first_use.Tcp6Row, 56, 52),
+                                          (first_use.Udp4Row, 12, 8), (first_use.Udp6Row, 28, 24)):
+            with self.subTest(row=row_type):
+                self.assertEqual(ctypes.sizeof(row_type), size)
+                self.assertEqual(row_type.pid.offset, pid_offset)
+                row = row_type()
+                row.pid = 123
+                offset = first_use.table_offset(row_type)
+                raw = (1).to_bytes(4, "little") + bytes(offset - 4) + bytes(row)
+                self.assertEqual(first_use.table_owner_pids(raw, row_type), {123})
+                for malformed in (raw[:offset - 1], raw[:-1], (10001).to_bytes(4, "little") + raw[4:]):
+                    with self.assertRaisesRegex(first_use.CheckFailed, "native_table_shape"):
+                        first_use.table_owner_pids(malformed, row_type)
+
+    def test_native_table_growth_is_bounded_and_api_codes_fail_closed(self):
+        row = first_use.Tcp6Row()
+        row.pid = 42
+        raw = (1).to_bytes(4, "little") + bytes(first_use.table_offset(type(row)) - 4) + bytes(row)
+        calls = []
+        def growing(buffer, size_pointer, order, family, table_class, reserved):
+            calls.append((order, family, table_class, reserved))
+            size = ctypes.cast(size_pointer, ctypes.POINTER(first_use.U32))
+            if len(calls) == 1:
+                size.contents.value = 4
+                return 122
+            size.contents.value = len(raw)
+            if len(calls) == 2:
+                return 122
+            ctypes.memmove(buffer, raw, len(raw))
+            return 0
+        self.assertEqual(first_use.native_table(growing, 23, 3, type(row), "native_tcp_snapshot"), {42})
+        self.assertEqual(calls, [(False, 23, 3, 0)] * 3)
+        with self.assertRaisesRegex(first_use.CheckFailed, "native_udp_snapshot"):
+            first_use.native_table(lambda *_: 5, 2, 1, first_use.Udp4Row, "native_udp_snapshot")
+        def excessive(_buffer, size_pointer, *_args):
+            ctypes.cast(size_pointer, ctypes.POINTER(first_use.U32)).contents.value = first_use.MAX_NATIVE_TABLE + 1
+            return 122
+        with self.assertRaisesRegex(first_use.CheckFailed, "native_table_limit"):
+            first_use.native_table(excessive, 2, 1, first_use.Udp4Row, "native_udp_snapshot")
+
+    def test_toolhelp_closes_handles_on_first_or_next_failure(self):
+        native = object.__new__(first_use.NativeWindowsSnapshots)
+        native.kernel = Mock()
+        native.kernel.CreateToolhelp32Snapshot.return_value = 123
+        native.kernel.Process32FirstW.return_value = 0
+        with self.assertRaisesRegex(first_use.CheckFailed, "native_process_snapshot"):
+            native.processes()
+        native.kernel.CloseHandle.assert_called_once_with(123)
+        native.kernel.reset_mock()
+        native.kernel.Process32FirstW.return_value = 1
+        native.kernel.Process32NextW.return_value = 0
+        with patch.object(ctypes, "get_last_error", return_value=5, create=True):
+            with self.assertRaisesRegex(first_use.CheckFailed, "native_process_snapshot"):
+                native.processes()
+        native.kernel.CloseHandle.assert_called_once_with(123)
+
+    def test_window_callback_failure_is_private_and_destroyed_window_is_ignored(self):
+        native = object.__new__(first_use.NativeWindowsSnapshots)
+        native.window_callback = lambda callback: callback
+        native.user = Mock()
+        native.user.EnumWindows.side_effect = lambda callback, _parameter: callback(1, 0)
+        native.user.IsWindowVisible.side_effect = RuntimeError("PRIVATE_FIXTURE")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with self.assertRaisesRegex(first_use.CheckFailed, "native_visible_windows"):
+                native.visible_windows()
+        self.assertEqual(output.getvalue(), "")
+        native.user.IsWindowVisible.side_effect = None
+        native.user.IsWindowVisible.return_value = 1
+        native.user.GetWindowThreadProcessId.return_value = 0
+        self.assertEqual(native.visible_windows(), set())
 
     def test_pairing_output_requires_exact_fresh_code_without_exposing_it(self):
         with tempfile.TemporaryDirectory() as directory:

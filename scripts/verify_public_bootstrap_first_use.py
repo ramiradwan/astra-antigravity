@@ -12,6 +12,7 @@ from its verified downloaded tarball, not an unpinned registry dist-tag.
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
 import io
 import json
@@ -41,8 +42,6 @@ APP_ID = "AstraAntigravityCompanion"
 HASH = re.compile(r"[a-f0-9]{64}")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 MAX_OUTPUT = 262_144
-MONITOR_DIAGNOSTICS = ("monitor_started", "windows_sample_ready", "tcp_sample_ready", "udp_sample_ready",
-                       "monitor_permission_denied", "monitor_command_unavailable", "monitor_cim_error", "monitor_other_error")
 
 
 class CheckFailed(Exception):
@@ -211,119 +210,239 @@ def captured(arguments, environment, timeout=40):
     return bytes(buffers[0])
 
 
-# Only process names/IDs and sampled window/listener owner IDs enter the pipe.
-# Neither process command lines nor files, account names or connection URLs are
-# observed. Process-start events cover short-lived providers between samples.
-MONITOR = r"""
-$ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-[Console]::Out.WriteLine('{"monitor_started":true}')
-try {
-  Register-WmiEvent -Class 'Win32_ProcessStartTrace' -SourceIdentifier 'BootstrapProcessTrace' | Out-Null
-  [Console]::Out.WriteLine('{"ready":true}')
-  $first = $true
-  $until = [DateTime]::UtcNow.AddSeconds(480)
-  while ([DateTime]::UtcNow -lt $until) {
-    foreach ($event in @(Get-Event -SourceIdentifier 'BootstrapProcessTrace' -ErrorAction SilentlyContinue)) {
-      $process = $event.SourceEventArgs.NewEvent
-      [Console]::Out.WriteLine((@{pid=[int]$process.ProcessID; parent=[int]$process.ParentProcessID; name=[string]$process.ProcessName} | ConvertTo-Json -Compress))
-      Remove-Event -EventIdentifier $event.EventIdentifier
-    }
-    $processes = @(Get-Process)
-    $windows = @($processes | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { $_.Id })
-    if ($first) { [Console]::Out.WriteLine('{"windows_sample_ready":true}') }
-    $tcp = @(Get-NetTCPConnection -State Listen | ForEach-Object { $_.OwningProcess })
-    if ($first) { [Console]::Out.WriteLine('{"tcp_sample_ready":true}') }
-    $udp = @(Get-NetUDPEndpoint | ForEach-Object { $_.OwningProcess })
-    if ($first) { [Console]::Out.WriteLine('{"udp_sample_ready":true}') }
-    [Console]::Out.WriteLine((@{sample=$true; windows=$windows; listeners=@($tcp + $udp); running=@($processes | ForEach-Object { $_.Id })} | ConvertTo-Json -Compress))
-    $first = $false
-    Start-Sleep -Milliseconds 200
-  }
-} catch {
-  # Map runtime errors to a strict set of booleans. Never emit the exception,
-  # message, target object, module name, stack, path or command text.
-  $kind = $_.Exception.GetType().FullName
-  if ($_.CategoryInfo.Category -eq 'PermissionDenied' -or $kind -eq 'System.UnauthorizedAccessException') {
-    [Console]::Out.WriteLine('{"error":true,"monitor_permission_denied":true}')
-  } elseif ($kind -eq 'System.Management.Automation.CommandNotFoundException') {
-    [Console]::Out.WriteLine('{"error":true,"monitor_command_unavailable":true}')
-  } elseif ($kind -eq 'Microsoft.Management.Infrastructure.CimException') {
-    [Console]::Out.WriteLine('{"error":true,"monitor_cim_error":true}')
-  } else { [Console]::Out.WriteLine('{"error":true,"monitor_other_error":true}') }
-}
-"""
+# Native metadata snapshots are supplementary evidence, not a process-start
+# trace. A 100 ms sample can miss short-lived processes, windows or endpoints;
+# a missed parent can leave a grandchild unlinked, and Windows can reuse PIDs.
+# No command line, title, address or port is retained or printed. The mandatory
+# setup-only/no-workspace/no-auth/no-task and lifecycle checks remain separate.
+# SDK layouts: tlhelp32/PROCESSENTRY32W; tcpmib/MIB_TCP{,6}ROW_OWNER_PID;
+# udpmib/MIB_UDP{,6}ROW_OWNER_PID. Derive table alignment from ctypes, not offsets.
+# https://learn.microsoft.com/windows/win32/api/tlhelp32/ns-tlhelp32-processentry32w
+# https://learn.microsoft.com/windows/win32/api/iphlpapi/nf-iphlpapi-getextendedtcptable
+# https://learn.microsoft.com/windows/win32/api/iphlpapi/nf-iphlpapi-getextendedudptable
+# https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-enumwindows
+U32 = ctypes.c_uint32
+MAX_NATIVE_TABLE = 4 * 1024 * 1024
+MAX_OBSERVATION_RECORDS = 10_000
+
+
+class ProcessEntry32W(ctypes.Structure):
+    _fields_ = [("size", U32), ("usage", U32), ("pid", U32), ("heap", ctypes.c_size_t),
+                ("module", U32), ("threads", U32), ("parent", U32), ("priority", ctypes.c_int32),
+                ("flags", U32), ("name", ctypes.c_uint16 * 260)]
+
+
+class Tcp4Row(ctypes.Structure):
+    _fields_ = [(key, U32) for key in ("state", "local_address", "local_port", "remote_address", "remote_port", "pid")]
+
+
+class Tcp6Row(ctypes.Structure):
+    _fields_ = [("local_address", ctypes.c_ubyte * 16), ("local_scope", U32), ("local_port", U32),
+                ("remote_address", ctypes.c_ubyte * 16), ("remote_scope", U32), ("remote_port", U32), ("state", U32), ("pid", U32)]
+
+
+class Udp4Row(ctypes.Structure):
+    _fields_ = [(key, U32) for key in ("local_address", "local_port", "pid")]
+
+
+class Udp6Row(ctypes.Structure):
+    _fields_ = [("local_address", ctypes.c_ubyte * 16), ("local_scope", U32), ("local_port", U32), ("pid", U32)]
+
+
+def table_offset(row_type):
+    class Table(ctypes.Structure):
+        _fields_ = [("count", U32), ("table", row_type * 1)]
+    return Table.table.offset
+
+
+def table_owner_pids(raw, row_type):
+    offset, row_size = table_offset(row_type), ctypes.sizeof(row_type)
+    require(len(raw) >= offset, "native_table_shape")
+    count = U32.from_buffer_copy(raw[:4]).value
+    require(count <= MAX_OBSERVATION_RECORDS and offset + count * row_size <= len(raw), "native_table_shape")
+    return {row_type.from_buffer_copy(raw, offset + index * row_size).pid for index in range(count)} - {0}
+
+
+def native_table(function, family, table_class, row_type, check):
+    size = U32(0)
+    result = function(None, ctypes.byref(size), False, family, table_class, 0)
+    require(result in (0, 122), check)  # API return value, not GetLastError
+    for _ in range(3):
+        require(4 <= size.value <= MAX_NATIVE_TABLE, "native_table_limit")
+        buffer = ctypes.create_string_buffer(size.value)
+        allocated = size.value
+        result = function(buffer, ctypes.byref(size), False, family, table_class, 0)
+        if result == 122:  # endpoints can grow between the two calls
+            continue
+        require(result == 0 and size.value <= allocated, check)
+        return table_owner_pids(buffer.raw[:size.value], row_type)
+    raise CheckFailed(check)
+
+
+class NativeWindowsSnapshots:
+    def __init__(self):
+        require(os.name == "nt", "native_windows_snapshot")
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.user = ctypes.WinDLL("user32", use_last_error=True)
+        self.ip = ctypes.WinDLL("iphlpapi")
+        self.window_callback = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(ctypes.c_int, ctypes.c_void_p, ctypes.c_ssize_t)
+        self.kernel.CreateToolhelp32Snapshot.argtypes = [U32, U32]
+        self.kernel.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        for name in ("Process32FirstW", "Process32NextW"):
+            function = getattr(self.kernel, name)
+            function.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessEntry32W)]
+            function.restype = ctypes.c_int
+        self.kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        self.kernel.CloseHandle.restype = ctypes.c_int
+        self.user.EnumWindows.argtypes = [self.window_callback, ctypes.c_ssize_t]
+        self.user.EnumWindows.restype = ctypes.c_int
+        self.user.IsWindowVisible.argtypes = [ctypes.c_void_p]
+        self.user.IsWindowVisible.restype = ctypes.c_int
+        self.user.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(U32)]
+        self.user.GetWindowThreadProcessId.restype = U32
+        for name in ("GetExtendedTcpTable", "GetExtendedUdpTable"):
+            function = getattr(self.ip, name)
+            function.argtypes = [ctypes.c_void_p, ctypes.POINTER(U32), ctypes.c_int, U32, ctypes.c_int, U32]
+            function.restype = U32
+        self.windows_ready = self.tcp_ready = self.udp_ready = False
+
+    def processes(self):
+        handle = self.kernel.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+        require(handle not in (None, ctypes.c_void_p(-1).value), "native_process_snapshot")
+        try:
+            entry = ProcessEntry32W()
+            entry.size = ctypes.sizeof(entry)
+            require(bool(self.kernel.Process32FirstW(handle, ctypes.byref(entry))), "native_process_snapshot")
+            records = []
+            while True:
+                require(len(records) < MAX_OBSERVATION_RECORDS, "native_process_limit")
+                name = bytes(entry.name).decode("utf-16le", errors="replace").split("\0", 1)[0]
+                records.append({"pid": entry.pid, "parent": entry.parent, "name": name})
+                if not self.kernel.Process32NextW(handle, ctypes.byref(entry)):
+                    require(ctypes.get_last_error() == 18, "native_process_snapshot")  # ERROR_NO_MORE_FILES
+                    return records
+        finally:
+            self.kernel.CloseHandle(handle)
+
+    def visible_windows(self):
+        owners, failed = set(), []
+        def callback(window, _parameter):
+            try:
+                if self.user.IsWindowVisible(window):
+                    pid = U32(0)
+                    thread = self.user.GetWindowThreadProcessId(window, ctypes.byref(pid))
+                    if thread and pid.value:  # HWND may disappear during enumeration
+                        owners.add(pid.value)
+                return 1
+            except Exception:
+                failed.append(True)
+                return 0  # never let ctypes print a callback exception/traceback
+        retained = self.window_callback(callback)
+        result = self.user.EnumWindows(retained, 0)
+        require(bool(result) and not failed, "native_visible_windows")
+        self.windows_ready = True
+        return owners
+
+    def snapshot(self):
+        processes = self.processes()
+        windows = self.visible_windows()
+        # AF_INET6 is 23 on Windows, independently of the host running unit tests.
+        tcp = native_table(self.ip.GetExtendedTcpTable, 2, 3, Tcp4Row, "native_tcp_snapshot")
+        tcp |= native_table(self.ip.GetExtendedTcpTable, 23, 3, Tcp6Row, "native_tcp_snapshot")
+        self.tcp_ready = True
+        udp = native_table(self.ip.GetExtendedUdpTable, 2, 1, Udp4Row, "native_udp_snapshot")
+        udp |= native_table(self.ip.GetExtendedUdpTable, 23, 1, Udp6Row, "native_udp_snapshot")
+        self.udp_ready = True
+        return {"processes": processes, "windows": windows, "listeners": tcp | udp}
 
 
 class Observation:
-    def __init__(self, environment):
+    def __init__(self, _environment=None):
         self.records = []
         self.ready = threading.Event()
+        self.started = threading.Event()
+        self.stopped = threading.Event()
+        self.lock = threading.Lock()
+        self.reader = None
+        self.api = None
         self.failed = False
-        self.reader_failed = False
-        self.process = None
-        self.environment = environment
+        self.failure_check = None
+        self.seen = set()
 
     def start(self):
-        shell = Path(self.environment["SYSTEMROOT"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-        encoded = base64.b64encode(MONITOR.encode("utf-16le")).decode("ascii")
-        self.process = subprocess.Popen([str(shell), "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", encoded],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=self.environment,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
-        require(self.ready.wait(25) and not self.failed, "process_trace_ready")
-        # Require a successful listener/window sample as well as trace startup.
-        try:
-            wait_for(lambda: self.has_sample() or self.failed, 25)
-        except CheckFailed:
-            raise CheckFailed("observation_sample_ready") from None
-        require(not self.failed and any(record.get("sample") for record in self.records), "observation_ready")
+        available = self.ready.wait(25)
+        if self.failure_check:
+            raise CheckFailed(self.failure_check)
+        require(available and self.has_sample(), "observation_sample_ready")
 
     def has_sample(self):
-        return any(record.get("sample") is True for record in self.records)
+        with self.lock:
+            return any(record.get("sample") is True for record in self.records)
 
     def diagnostics(self, report):
-        # Only explicitly allowlisted boolean fields cross the logging boundary.
-        report["process_trace_ready"] = self.ready.is_set()
-        report["observation_sample_available"] = self.has_sample()
-        report["monitor_read_failed"] = self.reader_failed
-        report["monitor_exited"] = self.process is not None and self.process.poll() is not None
-        for key in MONITOR_DIAGNOSTICS:
-            report[key] = any(record.get(key) is True for record in self.records)
+        report.update(process_snapshots_used=self.has_sample(), process_start_trace_used=False,
+                      sampling_can_miss_short_lived_activity=True, monitor_started=self.started.is_set(),
+                      monitor_read_failed=self.failed, monitor_exited=self.reader is not None and not self.reader.is_alive(),
+                      observation_sample_available=self.has_sample())
+        for key in ("windows", "tcp", "udp"):
+            report[key + "_sample_ready"] = bool(self.api and getattr(self.api, key + "_ready", False))
+
+    def _capture(self, snapshot, *, baseline=False):
+        with self.lock:
+            for record in snapshot["processes"]:
+                identity = (record["pid"], record["parent"], record["name"].casefold())
+                if identity not in self.seen:
+                    self.seen.add(identity)
+                    if not baseline:
+                        self.records.append(record)
+            require(len(self.seen) <= MAX_OBSERVATION_RECORDS, "observation_record_limit")
+            owned = descendants(self.records, os.getpid())
+            # Only owned PID sets are retained for repeated samples. Unrelated
+            # baseline process names never enter the event records or report.
+            self.records.append({"sample": True, "windows": sorted(owned.intersection(snapshot["windows"])),
+                                 "listeners": sorted(owned.intersection(snapshot["listeners"])),
+                                 "running": sorted(owned.intersection(record["pid"] for record in snapshot["processes"]))})
+            require(len(self.records) <= MAX_OBSERVATION_RECORDS, "observation_record_limit")
 
     def _read(self):
+        self.started.set()
         try:
-            while raw := self.process.stdout.readline(65_537):
-                if len(raw) > 65_536 or len(self.records) >= 10_000:
-                    self.failed = True
-                    self.reader_failed = True
-                    break
-                value = json.loads(raw)
-                if value.get("error"):
-                    self.failed = True
-                if value.get("ready"):
-                    self.ready.set()
-                self.records.append(value)
+            self.api = self.api or NativeWindowsSnapshots()
+            self._capture(self.api.snapshot(), baseline=True)
+            self.ready.set()
+            deadline = time.monotonic() + 480
+            while not self.stopped.wait(.1):
+                require(time.monotonic() < deadline, "observation_time_limit")
+                self._capture(self.api.snapshot())
+        except CheckFailed as error:
+            self.failed = True
+            self.failure_check = str(error)  # only fixed local check identifiers
         except Exception:
             self.failed = True
-            self.reader_failed = True
+            self.failure_check = "native_snapshot_failed"
+        finally:
+            self.ready.set()  # wake start immediately on a native API failure
 
     def close(self):
-        if self.process:
-            self.process.terminate()
-            self.process.wait(timeout=10)
+        self.stopped.set()
+        if self.reader:
             self.reader.join(timeout=5)
+            require(not self.reader.is_alive(), "observation_closed")
+        require(not self.failed, self.failure_check or "observation_healthy")
 
     def verify(self, report):
-        require(not self.failed and self.process.poll() is None, "observation_healthy")
-        records = list(self.records)
+        require(not self.failed and self.stopped.is_set() and self.reader is not None
+                and not self.reader.is_alive(), "observation_healthy")
+        with self.lock:
+            records = list(self.records)
         owned = descendants(records, os.getpid())
         names = [record["name"].casefold() for record in records if record.get("pid") in owned]
+        providers = re.compile(r"(?:codex|agy|antigravity|claude|gemini|python|python3)(?:\.exe)?", re.I)
+        require(not any(providers.fullmatch(name) for name in names), "no_provider_process_observed")
         allowed = re.compile(r"(?:node|cmd|conhost|powershell|taskkill|astraantigravity|maintenance-helper-[a-f0-9]{16})\.exe")
         require(bool(names) and all(allowed.fullmatch(name) for name in names), "expected_processes_only")
-        providers = re.compile(r"(?:codex|agy|antigravity|claude|gemini|python|python3)(?:\.exe)?", re.I)
-        require(not any(providers.fullmatch(record.get("name", "")) for record in records), "no_provider_process_observed")
         samples = [record for record in records if record.get("sample")]
         require(len(samples) >= 3, "observation_samples")
         require(not any(owned.intersection(sample.get("windows", [])) for sample in samples), "no_window_observed")
@@ -332,14 +451,16 @@ class Observation:
             report[key] = True
 
     def wait_stopped(self):
-        previous = sum(bool(record.get("sample")) for record in self.records)
+        with self.lock:
+            previous = sum(bool(record.get("sample")) for record in self.records)
         def stopped():
-            records = list(self.records)
+            require(not self.failed, self.failure_check or "observation_healthy")
+            with self.lock:
+                records = list(self.records)
             samples = [record for record in records if record.get("sample")]
             owned = descendants(records, os.getpid())
             return len(samples) >= previous + 2 and all(not owned.intersection(sample["running"]) for sample in samples[-2:])
         wait_for(stopped, 20)
-
 
 def descendants(records, parent):
     owned = {parent}
@@ -543,25 +664,35 @@ def verify(report):
                     except Exception:
                         report["supported_stop_and_uninstall"] = False
                         raise
-                if observer_started:
-                    require(observer.has_sample(), "observation_available")
-                    observer.verify(report)
             except CheckFailed as error:
                 report[str(error)] = False
                 if not primary_failed:
+                    primary_failed = True
                     raise
             except Exception:
                 report["observation_finalization_failed"] = True
                 if not primary_failed:
+                    primary_failed = True
                     raise
             finally:
-                observer.diagnostics(report)
                 try:
                     observer.close()
-                except Exception:
-                    report["observation_closed"] = False
+                    report["observation_closed"] = True
+                    if observer_started:
+                        require(observer.has_sample(), "observation_available")
+                        observer.verify(report)
+                except CheckFailed as error:
+                    report.setdefault("observation_closed", False)
+                    report[str(error)] = False
                     if not primary_failed:
-                        raise CheckFailed("observation_closed") from None
+                        raise
+                except Exception:
+                    report.setdefault("observation_closed", False)
+                    report["observation_finalization_failed"] = True
+                    if not primary_failed:
+                        raise CheckFailed("observation_finalization_failed") from None
+                finally:
+                    observer.diagnostics(report)
 
 
 def main():
