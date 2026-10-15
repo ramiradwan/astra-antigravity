@@ -278,11 +278,42 @@ class FirstUseTests(unittest.TestCase):
         observer = first_use.Observation({"SYSTEMROOT": "fixture"})
         observer.ready.set()
         observer.records = [{"windows_sample_ready": True}]
-        with patch.object(first_use.subprocess, "Popen", return_value=Mock()), patch.object(first_use.threading, "Thread") as thread, \
+        with patch.object(first_use.subprocess, "Popen", return_value=Mock()) as process, patch.object(first_use.threading, "Thread") as thread, \
              patch.object(first_use, "wait_for", side_effect=first_use.CheckFailed("bounded_state_wait")):
             with self.assertRaisesRegex(first_use.CheckFailed, "^observation_sample_ready$"):
                 observer.start()
         thread.return_value.start.assert_called_once()
+        arguments = process.call_args.args[0]
+        self.assertEqual(arguments[-2], "-EncodedCommand")
+        self.assertEqual(base64.b64decode(arguments[-1]).decode("utf-16le"), first_use.MONITOR)
+        self.assertNotIn(first_use.MONITOR, arguments)
+
+    def test_monitor_diagnostics_expose_only_fixed_boolean_status(self):
+        observer = first_use.Observation({})
+        observer.process = Mock()
+        observer.process.poll.return_value = 1
+        observer.records = [{"monitor_started": True, "PRIVATE_FIXTURE": "secret"}]
+        observer.process.stdout.readline.side_effect = [b"not valid JSON PRIVATE_FIXTURE\n"]
+        observer._read()
+        report = {}
+        observer.diagnostics(report)
+        self.assertIs(report["monitor_started"], True)
+        self.assertIs(report["monitor_read_failed"], True)
+        self.assertIs(report["monitor_exited"], True)
+        self.assertTrue(all(type(value) is bool for value in report.values()))
+        self.assertNotIn("PRIVATE_FIXTURE", json.dumps(report))
+
+    def test_pairing_output_requires_exact_fresh_code_without_exposing_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            code = "0123456789abcdef01234567"
+            (state / "headless-status.json").write_text(json.dumps({"pairing_code": code}))
+            output = ("Installing the headless companion.\nIn ChatGPT, connect this computer using code: " + code + "\n").encode()
+            first_use.verify_pairing_output(output, state)
+            for incorrect in (b"The companion is installed. Return to Computers in ChatGPT to continue setup.\n",
+                              output.replace(code.encode(), b"f" * 24), output + output):
+                with self.assertRaisesRegex(first_use.CheckFailed, "^pairing_code_returned$"):
+                    first_use.verify_pairing_output(incorrect, state)
 
 
 if __name__ == "__main__":

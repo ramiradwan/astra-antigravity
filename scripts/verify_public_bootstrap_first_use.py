@@ -41,7 +41,7 @@ APP_ID = "AstraAntigravityCompanion"
 HASH = re.compile(r"[a-f0-9]{64}")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 MAX_OUTPUT = 262_144
-MONITOR_DIAGNOSTICS = ("windows_sample_ready", "tcp_sample_ready", "udp_sample_ready",
+MONITOR_DIAGNOSTICS = ("monitor_started", "windows_sample_ready", "tcp_sample_ready", "udp_sample_ready",
                        "monitor_permission_denied", "monitor_command_unavailable", "monitor_cim_error", "monitor_other_error")
 
 
@@ -216,6 +216,8 @@ def captured(arguments, environment, timeout=40):
 # observed. Process-start events cover short-lived providers between samples.
 MONITOR = r"""
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::Out.WriteLine('{"monitor_started":true}')
 try {
   Register-CimIndicationEvent -Query 'SELECT * FROM Win32_ProcessStartTrace' -SourceIdentifier 'BootstrapProcessTrace' | Out-Null
   [Console]::Out.WriteLine('{"ready":true}')
@@ -258,12 +260,14 @@ class Observation:
         self.records = []
         self.ready = threading.Event()
         self.failed = False
+        self.reader_failed = False
         self.process = None
         self.environment = environment
 
     def start(self):
         shell = Path(self.environment["SYSTEMROOT"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-        self.process = subprocess.Popen([str(shell), "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", MONITOR],
+        encoded = base64.b64encode(MONITOR.encode("utf-16le")).decode("ascii")
+        self.process = subprocess.Popen([str(shell), "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", encoded],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=self.environment,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.reader = threading.Thread(target=self._read, daemon=True)
@@ -283,6 +287,8 @@ class Observation:
         # Only explicitly allowlisted boolean fields cross the logging boundary.
         report["process_trace_ready"] = self.ready.is_set()
         report["observation_sample_available"] = self.has_sample()
+        report["monitor_read_failed"] = self.reader_failed
+        report["monitor_exited"] = self.process is not None and self.process.poll() is not None
         for key in MONITOR_DIAGNOSTICS:
             report[key] = any(record.get(key) is True for record in self.records)
 
@@ -291,6 +297,7 @@ class Observation:
             while raw := self.process.stdout.readline(65_537):
                 if len(raw) > 65_536 or len(self.records) >= 10_000:
                     self.failed = True
+                    self.reader_failed = True
                     break
                 value = json.loads(raw)
                 if value.get("error"):
@@ -300,6 +307,7 @@ class Observation:
                 self.records.append(value)
         except Exception:
             self.failed = True
+            self.reader_failed = True
 
     def close(self):
         if self.process:
@@ -434,6 +442,13 @@ def verify_pending(state, pins, now=None):
     require(not any((state / "worker" / name).exists() for name in ("auth.json", "worker.json", "worker.sqlite3", "provider-tasks")), "no_authorized_worker_or_tasks")
 
 
+def verify_pairing_output(output, state):
+    code = json_file(state / "headless-status.json").get("pairing_code")
+    require(type(code) is str and re.fullmatch(r"[a-f0-9]{24}", code) is not None, "pairing_code_returned")
+    expected = ("In ChatGPT, connect this computer using code: " + code).encode("ascii")
+    require(output.splitlines().count(expected) == 1, "pairing_code_returned")
+
+
 def cleanup(root, state, shortcut, pins, environment):
     launcher = root / "AstraAntigravity.exe"
     require(verified_executable(launcher, pins), "owned_cleanup_executable")
@@ -492,13 +507,15 @@ def verify(report):
             observer.start()
             observer_started = True
             install_attempted = True
-            captured([node, npx, "--yes", "--package", tarball, "delegate-to-antigravity", "setup"], environment, timeout=180)
+            setup_output = captured([node, npx, "--yes", "--package", tarball, "delegate-to-antigravity", "setup"], environment, timeout=180)
             report["npx_setup_exited"] = True
             verify_install(root, shortcut, pins)
             report["installed_and_registered"] = True
             wait_for(lambda: (state / "worker/pairing.json").is_file(), 45)
             verify_pending(state, pins)
             report["management_only_pairing"] = True
+            verify_pairing_output(setup_output, state)
+            report["pairing_code_returned"] = True
             public_status = json.loads(captured([root / "AstraAntigravity.exe", "--status"], environment))
             require(public_status.get("status") == "approval_required" and public_status.get("worker_running") is False
                     and public_status.get("companion_version") == pins["companion_version"], "public_status_command")
