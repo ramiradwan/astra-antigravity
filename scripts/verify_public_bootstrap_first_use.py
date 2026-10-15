@@ -219,7 +219,7 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::Out.WriteLine('{"monitor_started":true}')
 try {
-  Register-CimIndicationEvent -Query 'SELECT * FROM Win32_ProcessStartTrace' -SourceIdentifier 'BootstrapProcessTrace' | Out-Null
+  Register-WmiEvent -Class 'Win32_ProcessStartTrace' -SourceIdentifier 'BootstrapProcessTrace' | Out-Null
   [Console]::Out.WriteLine('{"ready":true}')
   $first = $true
   $until = [DateTime]::UtcNow.AddSeconds(480)

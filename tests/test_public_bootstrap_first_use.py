@@ -303,6 +303,22 @@ class FirstUseTests(unittest.TestCase):
         self.assertTrue(all(type(value) is bool for value in report.values()))
         self.assertNotIn("PRIVATE_FIXTURE", json.dumps(report))
 
+    def test_process_start_queue_records_and_samples_keep_the_observer_contract(self):
+        observer = first_use.Observation({})
+        record = {"pid": 123456, "parent": first_use.os.getpid(), "name": "node.exe"}
+        samples = [{"sample": True, "windows": [], "listeners": [], "running": []}] * 3
+        raw = b"\n".join(json.dumps(value).encode() for value in [{"ready": True}, record, *samples]) + b"\n"
+        observer.process = Mock(stdout=io.BytesIO(raw))
+        observer.process.poll.return_value = None
+        observer._read()
+        self.assertTrue(observer.ready.is_set())
+        self.assertTrue(observer.has_sample())
+        report = {}
+        observer.verify(report)
+        self.assertTrue(report["no_provider_process_observed"])
+        self.assertTrue(report["no_window_observed"])
+        self.assertTrue(report["no_listener_observed"])
+
     def test_pairing_output_requires_exact_fresh_code_without_exposing_it(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
