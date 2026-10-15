@@ -1,0 +1,2 @@
+-r ../relay/worker-requirements.in
+pyinstaller==6.22.3

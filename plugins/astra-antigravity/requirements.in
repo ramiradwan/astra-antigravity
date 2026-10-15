@@ -1,0 +1,2 @@
+# Runtime dependencies. Resolve requirements.lock with universal, hashed uv pip compile.
+mcp[cli]==1.29.1

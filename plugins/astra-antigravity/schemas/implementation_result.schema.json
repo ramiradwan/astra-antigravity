@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "tests_run": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tests_passed": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "remaining_work": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "summary",
+    "tests_run",
+    "tests_passed",
+    "remaining_work",
+    "risks"
+  ],
+  "additionalProperties": false
+}

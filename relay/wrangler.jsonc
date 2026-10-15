@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "astra-antigravity-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-14",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "rules": [{"type":"Text","globs":["**/*.html","**/astra.css","**/PRIVACY.md","**/TERMS.md","**/LICENSE"],"fallthrough":true}],
+  "vars": {
+    "PUBLIC_ORIGIN": "http://localhost:8787",
+    "OPENAI_APPS_CHALLENGE": "",
+    "DEPLOYMENT_MODE": "local",
+    "PUBLISHER_COST_POLICY": "free-only",
+    "COMPANION_BOOTSTRAP_URL": "",
+    "COMPANION_BOOTSTRAP_SHA256": "",
+    "CALLBACK_HOSTS": "chatgpt.com,api.openai.com",
+    "MAX_TASKS_PER_OWNER": "64",
+    "RETENTION_HOURS": "72"
+  },
+  "kv_namespaces": [{"binding": "OAUTH_KV"}],
+  "durable_objects": {"bindings": [
+    {"name": "OWNERS", "class_name": "OwnerRelay"},
+    {"name": "PAIRINGS", "class_name": "WorkerPairing"},
+    {"name": "DIRECTORY_MEMBERSHIP", "class_name": "DirectoryMembership"}
+  ]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["OwnerRelay", "WorkerPairing"]},
+    {"tag": "v2-directory-membership", "new_sqlite_classes": ["DirectoryMembership"]}],
+  "observability": {"enabled": false}
+}

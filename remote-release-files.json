@@ -1,0 +1,12 @@
+[
+  "plugin.json",
+  "mcp.json",
+  "LICENSE",
+  "README.md",
+  "assets/icon.svg",
+  "assets/icon-dark.svg",
+  "docs/PRIVACY.md",
+  "docs/TERMS.md",
+  "skills/connect-worker/SKILL.md",
+  "skills/delegate-to-worker/SKILL.md"
+]

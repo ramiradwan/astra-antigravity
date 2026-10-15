@@ -1,0 +1,36 @@
+name: Build Windows companion candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  companion:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify first-use boundaries
+        run: uv run --no-project --with-requirements relay/worker-requirements.lock python -m unittest discover -s tests -p 'test_companion*.py'
+      - name: Build standalone application and checksum
+        run: uv run --no-project --with-requirements companion/build-requirements.lock python scripts/build_companion.py
+      - name: Verify packaged startup without accounts or inference
+        shell: pwsh
+        run: |
+          $candidate = Get-ChildItem -LiteralPath dist/companion -Recurse -File -Filter AstraAntigravity.exe
+          if (@($candidate).Count -ne 1) { throw 'Expected one companion candidate' }
+          $receipt = Join-Path $env:RUNNER_TEMP 'astra-companion-smoke.json'
+          $state = Join-Path $env:RUNNER_TEMP 'astra-companion-smoke-state'
+          $process = Start-Process -FilePath $candidate.FullName -ArgumentList @('--portable', '--status', '--state', $state, '--status-file', $receipt) -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw 'Packaged companion did not start' }
+          $result = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
+          if ($result.status -ne 'not_running' -or $result.worker_running) { throw 'Unexpected startup result' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-antigravity-companion-windows
+          path: dist/companion/

@@ -1,0 +1,4 @@
+# Compatibility resources are served byte for byte on every checkout platform.
+relay/ui/compat/*.html text eol=lf
+# This shipped bundle contains CRLF; preserve and review it by its exact hash.
+relay/ui/compat/delegation-0.16.0.html binary

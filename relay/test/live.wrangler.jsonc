@@ -1,0 +1,21 @@
+{
+  "name": "astra-relay-loopback-test",
+  "main": "live-fixture.ts",
+  "compatibility_date": "2026-10-14",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "vars": {
+    "PUBLIC_ORIGIN": "http://127.0.0.1:8787",
+    "DEPLOYMENT_MODE": "local",
+    "PUBLISHER_COST_POLICY": "free-only",
+    "CALLBACK_HOSTS": "chatgpt.com,api.openai.com",
+    "MAX_TASKS_PER_OWNER": "64",
+    "RETENTION_HOURS": "72",
+    "SESSION_SECRET": "synthetic-loopback-test-key-not-for-deployment",
+    "GITHUB_CLIENT_ID": "synthetic-unused",
+    "GITHUB_CLIENT_SECRET": "synthetic-unused"
+  },
+  "kv_namespaces": [{"binding":"OAUTH_KV"}],
+  "durable_objects": {"bindings":[{"name":"OWNERS","class_name":"OwnerRelay"},{"name":"PAIRINGS","class_name":"WorkerPairing"}]},
+  "migrations": [{"tag":"test-v1","new_sqlite_classes":["OwnerRelay","WorkerPairing"]}],
+  "observability": {"enabled":false}
+}

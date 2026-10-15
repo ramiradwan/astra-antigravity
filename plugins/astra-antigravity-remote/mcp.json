@@ -1,0 +1,23 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "astra_relay": {
+      "type": "streamable-http",
+      "url": "https://astra-antigravity-relay.dipsys.workers.dev/mcp",
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "defaultScopes": [
+              "workspaces:read",
+              "tasks:read",
+              "tasks:write",
+              "computers:manage",
+              "account:delete"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

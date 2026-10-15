@@ -1,0 +1,32 @@
+{
+  "name": "astra-antigravity-local",
+  "interface": {
+    "displayName": "Delegate to Antigravity"
+  },
+  "plugins": [
+    {
+      "name": "astra-antigravity-remote",
+      "source": {
+        "source": "local",
+        "path": "./plugins/astra-antigravity-remote"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "astra-antigravity",
+      "source": {
+        "source": "local",
+        "path": "./plugins/astra-antigravity"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

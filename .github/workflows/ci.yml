@@ -1,0 +1,302 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  schedule:
+    - cron: '17 5 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  relay-ux:
+    name: Relay, ChatGPT card and free-cost contracts
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:cost
+      - run: npm run build
+      - name: Verify the npx companion bootstrap
+        run: node --test ../packages/companion-bootstrap/test/bootstrap.test.mjs
+
+  browser-ux:
+    name: Local browser UX and accessibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: relay
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+      - name: Install Chromium and system dependencies
+        run: npx playwright install --with-deps chromium
+      - name: Verify local hosted, companion and task-card journeys
+        run: npm run test:browser
+      - name: Upload browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-ux-failure
+          path: |
+            relay/playwright-report/
+            relay/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  python-unit:
+    name: Python ${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.10'
+          - os: ubuntu-latest
+            python: '3.13'
+          - os: windows-latest
+            python: '3.13'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Node for the background relay contract
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run test suite
+        shell: bash
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/ci_unittest.py
+
+      - name: Run worker transport and recovery contracts
+        if: matrix.python != '3.10'
+        shell: bash
+        run: uv run --no-project --with-requirements relay/worker-requirements.lock python -m unittest discover -s relay/test -p 'test_worker*.py'
+
+  codex-compat-pinned:
+    name: Codex 0.153.4 delegation contracts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install Codex Linux sandbox prerequisite
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor-profiles apparmor-utils
+          if [ -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict ]; then
+            sudo install -m 0644 \
+              /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+              /etc/apparmor.d/bwrap-userns-restrict
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          fi
+          bwrap --version
+
+      - name: Install pinned Codex CLI
+        run: npm install --global @openai/codex@0.153.4
+
+      - name: Assert no model resampling while await_task is pending
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_compat_harness.py
+
+      - name: Assert mandatory Luna planning contract
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_app_server_luna_planning_conformance.py
+
+      - name: Assert packaged plugin starts from an installed cache
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_plugin_installation_conformance.py
+
+      - name: Assert root model sees only compact Luna gateway lifecycle
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_root_context_firewall.py
+
+  codex-compat-0-160-linux:
+    name: Codex 0.160.0 delegation contracts (Linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install Codex Linux sandbox prerequisite
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor-profiles apparmor-utils
+          if [ -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict ]; then
+            sudo install -m 0644 \
+              /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+              /etc/apparmor.d/bwrap-userns-restrict
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          fi
+          bwrap --version
+
+      - name: Install Codex 0.160.0 CLI
+        run: npm install --global @openai/codex@0.160.0
+
+      - name: Assert no model resampling while await_task is pending
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_compat_harness.py
+
+      - name: Assert mandatory Luna planning contract
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_app_server_luna_planning_conformance.py
+
+      - name: Assert packaged plugin starts from an installed cache
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_plugin_installation_conformance.py
+
+      - name: Assert root model sees only compact Luna gateway lifecycle
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_root_context_firewall.py
+
+      - name: Assert background parent work and idle/active pushed tool output
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_background_delivery_conformance.py
+
+  codex-compat-0-160-windows:
+    name: Codex 0.160.0 delegation contracts (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install Codex 0.160.0 CLI
+        run: npm install --global @openai/codex@0.160.0
+
+      - name: Assert no model resampling while await_task is pending
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_compat_harness.py
+
+      - name: Assert mandatory Luna planning contract
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_app_server_luna_planning_conformance.py
+
+      - name: Assert packaged plugin starts from an installed cache
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_plugin_installation_conformance.py
+
+      - name: Assert root model sees only compact Luna gateway lifecycle
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_root_context_firewall.py
+
+      - name: Assert background parent work and idle/active pushed tool output
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_background_delivery_conformance.py
+
+  codex-compat-latest:
+    name: Latest Codex compatibility canary
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install Codex Linux sandbox prerequisite
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor-profiles apparmor-utils
+          if [ -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict ]; then
+            sudo install -m 0644 \
+              /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+              /etc/apparmor.d/bwrap-userns-restrict
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          fi
+          bwrap --version
+
+      - name: Install latest Codex CLI
+        run: npm install --global @openai/codex@latest
+
+      - name: Run no-resampling canary
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_compat_harness.py
+
+      - name: Run mandatory Luna planning canary
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_app_server_luna_planning_conformance.py
+
+      - name: Run root Luna gateway context-firewall canary
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_root_context_firewall.py
+
+      - name: Probe MCP progress forwarding
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_mcp_progress_canary.py
+
+      - name: Probe native Luna role selection
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/codex_luna_role_conformance.py

@@ -1,0 +1,40 @@
+name: Public bootstrap first use
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-bootstrap-first-use
+  cancel-in-progress: false
+
+jobs:
+  first-use:
+    # Only a standard, fresh public-repository runner is authorized to install.
+    # There are no inputs, pull-request triggers, self-hosted runners or secrets.
+    if: >-
+      github.repository == 'ramiradwan/astra-antigravity' &&
+      github.event.repository.private == false &&
+      github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out reviewed main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Verify public setup and local removal
+        run: python scripts/verify_public_bootstrap_first_use.py
+        # The helper emits only booleans, versions and hashes. Never upload
+        # stdout, npm logs, pairing state, command receipts or runner profiles.

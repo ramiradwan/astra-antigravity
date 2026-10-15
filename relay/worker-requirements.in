@@ -1,0 +1,3 @@
+# User worker only. The relay never invokes a billed model API.
+-r ../plugins/astra-antigravity/requirements.in
+websockets==17.2

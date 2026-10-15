@@ -1,0 +1,88 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "checks_performed": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 2000
+      },
+      "maxItems": 20
+    },
+    "checks_passed": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 512
+      },
+      "maxItems": 20
+    },
+    "remaining_work": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 2000
+      },
+      "maxItems": 20
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 2000
+      },
+      "maxItems": 20
+    },
+    "answer": {
+      "type": "string",
+      "maxLength": 6000
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 2000
+      },
+      "maxItems": 20
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 2000
+      },
+      "maxItems": 20
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 2000
+      },
+      "maxItems": 20
+    }
+  },
+  "required": [
+    "summary",
+    "checks_performed",
+    "checks_passed",
+    "artifacts",
+    "remaining_work",
+    "risks",
+    "answer",
+    "findings",
+    "evidence",
+    "limitations"
+  ],
+  "additionalProperties": false
+}

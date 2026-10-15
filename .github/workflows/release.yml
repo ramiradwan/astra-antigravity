@@ -1,0 +1,111 @@
+name: Prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      draft_release:
+        description: Create or update the draft GitHub release after validation
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: astral-sh/setup-uv@v6
+      - name: Run locked release suite
+        run: uv run --no-project --with-requirements plugins/astra-antigravity/requirements.lock python tests/ci_unittest.py
+      - name: Build clean reproducible package
+        run: python scripts/build_release.py --require-clean
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-antigravity-release
+          path: dist/
+
+  runtime:
+    name: Bundle runtime Python ${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v6
+      - name: Capture native hashed-wheel dependencies with licenses
+        run: python scripts/bundle_runtime.py capture
+      - name: Build native test package
+        run: python scripts/bundle_runtime.py bundle --runtimes dist/runtimes --output dist/native --allow-partial
+      - name: Verify extracted bundle with uv offline and PYTHONPATH poisoned
+        shell: bash
+        run: |
+          archive=$(find dist/native -name '*-bundled-runtime.zip')
+          uv run --no-project --python "${{ matrix.python }}" --with-requirements plugins/astra-antigravity/requirements.lock \
+            python tests/bundled_runtime_conformance.py "$archive"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.os }}-${{ matrix.python }}
+          path: dist/runtimes/runtime-*.zip
+
+  bundled:
+    needs: [prepare, runtime]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*
+          merge-multiple: true
+          path: dist/runtimes
+      - name: Build complete platform bundle
+        run: python scripts/bundle_runtime.py bundle --runtimes dist/runtimes --output dist/bundled
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-antigravity-bundled-runtime
+          path: dist/bundled/
+
+  draft:
+    if: inputs.draft_release && github.ref == 'refs/heads/main'
+    needs: [prepare, bundled]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: astra-antigravity-release
+          path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: astra-antigravity-bundled-runtime
+          path: dist/
+      - name: Prepare reviewable draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version=$(python -c 'import json; print(json.load(open("plugins/astra-antigravity/plugin.json"))["version"])')
+          python scripts/prepare_draft_release.py --apply --repo "${GITHUB_REPOSITORY}" \
+            --commit "${GITHUB_SHA}" --version "${version}" --artifacts dist

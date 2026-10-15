@@ -1,0 +1,41 @@
+{
+  "name": "astra-antigravity-relay",
+  "version": "0.17.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "npm run build:ui && tsc --noEmit && tsc --noEmit -p ui/tsconfig.json",
+    "types": "wrangler types --strict-vars false --include-runtime false",
+    "test:cost": "node --test test/cost-guard.test.mjs",
+    "dev": "npm run build:ui && wrangler dev --local",
+    "build": "npm run build:ui && wrangler deploy --dry-run",
+    "deploy:free": "npm run build:ui && node scripts/deploy-free.mjs",
+    "build:ui": "node scripts/build-ui.mjs",
+    "dev:gallery": "node dev/gallery-server.mjs",
+    "test:browser": "playwright test",
+    "pretest": "npm run build:ui"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.3",
+    "@modelcontextprotocol/core": "2.3.1",
+    "@modelcontextprotocol/ext-apps": "2.0.3",
+    "@modelcontextprotocol/server": "2.3.1",
+    "jose": "6.2.12",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@cloudflare/vitest-plugin": "1.4.2",
+    "@cloudflare/workers-types": "5.20261014.1",
+    "@playwright/test": "1.64.1",
+    "@types/node": "24.10.0",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.151.0"
+  }
+}
