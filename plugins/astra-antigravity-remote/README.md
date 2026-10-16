@@ -18,7 +18,7 @@ The GitHub tarball needs no npm publishing account. npx obtains the bootstrap
 through HTTPS; the bootstrap verifies the signed companion manifest and installer
 hash. The installed companion includes its runtime and runs without Node.js,
 Python, uv, a GUI, tray or local web listener. See
-[computer setup](../../companion/README.md).
+[computer setup](https://github.com/ramiradwan/astra-antigravity/blob/main/companion/README.md).
 
 Enter the connection code in Computers and approve management access. Check or
 install Codex and Antigravity, complete their normal sign-in on that computer,

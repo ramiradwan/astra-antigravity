@@ -267,7 +267,7 @@ async function fetchRelay(request: Request, env: Env, ctx: ExecutionContext, rec
       <p class="help">Already using the plugin? Return to your existing conversation. Connect the plugin from ChatGPT when asked to sign in.</p></section>
       <div class="grid"><section class="panel"><h2>Set up once on your computer</h2>
       <p>When setup is available, run the command shown in ChatGPT on the Windows computer that will run your tasks. Paste its pairing code in ChatGPT and approve the computer there.</p>
-      <p class="help">Public setup is not available in this preview yet. The companion runs in the background with no window, tray or local web page.</p></section>
+      <p class="help">The companion runs in the background with no window, tray or local web page.</p></section>
       <section class="panel"><h2>Your accounts and folders</h2><p>Tasks use your own Codex and Antigravity accounts in folders you approve. Provider sign-in can open the provider's own browser page. Keep your computer awake while tasks run.</p></section></div>`, new Headers(), [], { description: "Delegate tasks from ChatGPT to a computer you connect.", wide: true });
   return server.fetch(request, env, ctx);
 }
