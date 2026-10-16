@@ -21,6 +21,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from companion import maintenance
 
 
+# A cold Windows PowerShell process can take longer than ten seconds to start on
+# hosted runners. This is a fixture watchdog, separate from the generated
+# script's 20-second cleanup deadline (one second in the persistent-lock case).
+SHELL_STARTUP_SECONDS = 30
+
+
 class CleanupHelperTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="astra-cleanup-'fixture-")
@@ -127,7 +133,7 @@ class CleanupHelperTests(unittest.TestCase):
         return script.replace("[Threading.Thread]::Sleep(200)", hook), marker, gate
 
     def wait_retry(self, child, marker):
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + SHELL_STARTUP_SECONDS
         while not marker.exists() and child.poll() is None and time.monotonic() < deadline:
             time.sleep(.02)
         self.assertTrue(marker.exists(), "The locked fixture must reach the retry path")
@@ -167,7 +173,8 @@ class CleanupHelperTests(unittest.TestCase):
         script = script.replace("20000", "1000")
         with self.locked_fixture():
             child = self.fixture_shell(script)
-            self.assertEqual(child.wait(timeout=8), 1)
+            # Allow cold startup plus the one-second fixture retry and exit.
+            self.assertEqual(child.wait(timeout=SHELL_STARTUP_SECONDS + 2), 1)
             self.assertEqual(self.helper.read_bytes(), self.payload)
 
     @unittest.skipUnless(os.name == "nt", "Windows system shell")
@@ -175,7 +182,7 @@ class CleanupHelperTests(unittest.TestCase):
         script = self.script()
         self.helper.unlink()
         child = self.fixture_shell(script)
-        self.assertEqual(child.wait(timeout=10), 0)
+        self.assertEqual(child.wait(timeout=SHELL_STARTUP_SECONDS), 0)
         self.assertTrue(self.state.is_dir())
 
     @unittest.skipUnless(os.name == "nt", "Windows sharing, reparse points and system shell")

@@ -9,6 +9,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from urllib.parse import parse_qs, urlsplit
 
@@ -57,7 +58,21 @@ def atomic_json(path, value):
         json.dump(value, stream, sort_keys=True)
         stream.flush()
         os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    # A concurrent Windows reader may briefly deny delete sharing. The fully
+    # flushed new file stays private until one atomic replacement succeeds;
+    # persistent locks and all unrelated failures still propagate normally.
+    deadline = time.monotonic() + 1
+    while True:
+        if path.is_symlink() or temporary.is_symlink():
+            raise ValueError("Application settings must not be links")
+        try:
+            os.replace(temporary, path)
+            return
+        except OSError as error:
+            remaining = deadline - time.monotonic()
+            if getattr(error, "winerror", None) not in (5, 32, 33) or remaining <= 0:
+                raise
+            time.sleep(min(.02, remaining))
 
 
 def is_link(path):

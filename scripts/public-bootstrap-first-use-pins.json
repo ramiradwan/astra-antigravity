@@ -6,9 +6,9 @@
   "bootstrap_sha256": "b05a8428d0d38703454402ad6510df6d84cb951b06757c81257e11d93c1464ad",
   "companion_version": "0.4.2",
   "manifest_url": "https://github.com/ramiradwan/astra-antigravity/releases/latest/download/companion-win32-stable.json",
-  "manifest_sha256": "0c4c8e1019a56ab8ae6a2ec71d6079d495dae6582af4e691ad86ae66f3ccc38f",
+  "manifest_sha256": "fe872c4d33764809cbfb97d6d05570062d3d51652dfe7671b7c4ec034b2441f7",
   "installer_url": "https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.2/AstraAntigravity.exe",
-  "installer_sha256": "29793c61ae5e1d1863e9f72693c6250cc54d8e079c0c712ba70ee438017ae1c9",
-  "installer_size": 26027264,
+  "installer_sha256": "201146a99bff3669805964fc058c538c3aff7952c3060e839279eee92fb58475",
+  "installer_size": 26028491,
   "sequence": 2026101602
 }

@@ -14,7 +14,7 @@ On the Windows computer that will run tasks, run the version-pinned command show
 in ChatGPT's Computers panel:
 
 ```sh
-npx --yes https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.1/delegate-to-antigravity-0.4.1.tgz setup
+npx --yes https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.2/delegate-to-antigravity-0.4.2.tgz setup
 ```
 
 Use the card's `--request-id ID` when it has saved a first task. Setup downloads

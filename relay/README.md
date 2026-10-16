@@ -10,7 +10,7 @@ the headless companion in ChatGPT. Use the version-pinned command shown in
 Computers:
 
 ```sh
-npx --yes https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.1/delegate-to-antigravity-0.4.1.tgz setup
+npx --yes https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.2/delegate-to-antigravity-0.4.2.tgz setup
 ```
 
 The bootstrap comes from GitHub HTTPS and verifies the signed companion manifest

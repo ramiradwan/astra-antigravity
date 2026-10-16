@@ -3,6 +3,7 @@
 ## Companion 0.4.2
 
 - Remove the copied Windows maintenance helper after uninstall.
+- Retry transient Windows status-file sharing without interrupting pairing.
 - Update the version-pinned setup package to 0.4.2.
 
 ## HTTPS 0.17.0

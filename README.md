@@ -3,7 +3,7 @@
 Delegate coding, analysis, research from supplied sources, and document tasks to
 Antigravity using your own accounts. Review the result in ChatGPT or Codex.
 
-Remote edition **0.17.0** Â· Windows companion **0.4.1**
+Remote edition **0.17.0** | Windows companion **0.4.2**
 
 Plugin release: **0.9.2** (local edition).
 
@@ -18,7 +18,7 @@ terms apply; the plugin does not supply or pool provider accounts.
    computer that will do the work:
 
    ```sh
-   npx --yes https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.1/delegate-to-antigravity-0.4.1.tgz setup
+   npx --yes https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.2/delegate-to-antigravity-0.4.2.tgz setup
    ```
 
 3. Enter the connection code in ChatGPT and approve computer management. Check
