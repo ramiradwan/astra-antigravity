@@ -1,14 +1,14 @@
 {
   "schema": 1,
   "repository": "ramiradwan/astra-antigravity",
-  "bootstrap_version": "0.4.1",
-  "bootstrap_url": "https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.1/delegate-to-antigravity-0.4.1.tgz",
-  "bootstrap_sha256": "0880d459f2796572aba59ddec7b8fd82d9f1fe476004d54032443c002206d3e7",
-  "companion_version": "0.4.1",
+  "bootstrap_version": "0.4.2",
+  "bootstrap_url": "https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.2/delegate-to-antigravity-0.4.2.tgz",
+  "bootstrap_sha256": "b05a8428d0d38703454402ad6510df6d84cb951b06757c81257e11d93c1464ad",
+  "companion_version": "0.4.2",
   "manifest_url": "https://github.com/ramiradwan/astra-antigravity/releases/latest/download/companion-win32-stable.json",
-  "manifest_sha256": "e0a7ee694b4167c3073f6dda7592fae81d34f59d3f54562080e8392d88903d01",
-  "installer_url": "https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.1/AstraAntigravity.exe",
-  "installer_sha256": "52f50279f8304a983595140206667001c3064349d462fa3777ebeef302a9adc5",
-  "installer_size": 24867373,
-  "sequence": 2026101601
+  "manifest_sha256": "0c4c8e1019a56ab8ae6a2ec71d6079d495dae6582af4e691ad86ae66f3ccc38f",
+  "installer_url": "https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.2/AstraAntigravity.exe",
+  "installer_sha256": "29793c61ae5e1d1863e9f72693c6250cc54d8e079c0c712ba70ee438017ae1c9",
+  "installer_size": 26027264,
+  "sequence": 2026101602
 }

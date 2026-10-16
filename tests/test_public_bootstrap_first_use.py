@@ -146,7 +146,7 @@ class FirstUseTests(unittest.TestCase):
 
     def state_fixture(self, state):
         (state / "worker").mkdir()
-        live = {"status": "approval_required", "worker_running": False, "companion_version": "0.4.1", "startup_enabled": False,
+        live = {"status": "approval_required", "worker_running": False, "companion_version": self.pins["companion_version"], "startup_enabled": False,
                 "validation_pending": False, "pid": 123, "observed_at": 10000, "pairing_code": "PRIVATE_FIXTURE"}
         pending = {"config": {"setup_only": True, "workspaces": {}, "cloud_task_id": None}, "setup_request_id": None,
                    "secret": "PRIVATE_FIXTURE", "paired": {"claim": "PRIVATE_FIXTURE"}}
