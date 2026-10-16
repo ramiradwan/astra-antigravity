@@ -4,7 +4,7 @@ Run the version-pinned command shown in **Computers** in ChatGPT on the Windows
 computer that will perform your tasks. Node.js 20 or later is needed for setup:
 
 ```sh
-npx --yes https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.1/delegate-to-antigravity-0.4.1.tgz setup
+npx --yes https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.2/delegate-to-antigravity-0.4.2.tgz setup
 ```
 
 The command downloads this bootstrap through GitHub HTTPS. The bootstrap verifies

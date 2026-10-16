@@ -8,7 +8,7 @@ or local network listener.
 Start setup on the Windows computer that will run your tasks:
 
 ```sh
-npx --yes https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.1/delegate-to-antigravity-0.4.1.tgz setup
+npx --yes https://github.com/ramiradwan/astra-antigravity/releases/download/companion-v0.4.2/delegate-to-antigravity-0.4.2.tgz setup
 ```
 
 Use the version-pinned command shown in Computers in ChatGPT. It is enabled only

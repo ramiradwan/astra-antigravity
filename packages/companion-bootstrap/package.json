@@ -1,6 +1,6 @@
 {
   "name": "delegate-to-antigravity",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Install the computer companion for Delegate to Antigravity",
   "type": "module",
   "bin": { "delegate-to-antigravity": "bin.mjs" },

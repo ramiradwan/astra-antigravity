@@ -12,7 +12,7 @@ import sys
 from contextlib import contextmanager
 from urllib.parse import parse_qs, urlsplit
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 SCHEME = "astra-antigravity"
 APP_ID = "AstraAntigravityCompanion"
 

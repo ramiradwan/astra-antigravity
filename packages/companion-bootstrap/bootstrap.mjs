@@ -36,7 +36,7 @@ function secureUrl(value, { release = false, manifest = false, redirect = false 
 async function getResponse(url, request, maximum) {
   let destination = url;
   for (let hop = 0; hop < 5; hop++) {
-    const response = await request(destination, { redirect: "manual", signal: AbortSignal.timeout(120_000), headers: { Accept: "application/octet-stream", "User-Agent": "Delegate-to-Antigravity-Setup/0.4.1" } });
+    const response = await request(destination, { redirect: "manual", signal: AbortSignal.timeout(120_000), headers: { Accept: "application/octet-stream", "User-Agent": "Delegate-to-Antigravity-Setup/0.4.2" } });
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       const location = response.headers.get("location");
       await response.body?.cancel();

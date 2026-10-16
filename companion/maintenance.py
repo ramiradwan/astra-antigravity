@@ -263,23 +263,162 @@ def activate_update(state, *, healthy, start=integration.launch):
     return "rolled_back"
 
 
-def cleanup_helper(state):
-    """A bounded native shell removes only this exact copied EXE after exit."""
-    helper = Path(sys.executable).resolve()
-    state = Path(state).resolve()
-    if os.name != "nt" or helper.parent != state or not re.fullmatch(r"maintenance-helper-[a-f0-9]{16}\.exe", helper.name) or integration.is_link(helper):
-        return False
+def helper_cleanup_script(helper, state, expected, size, parent_pid):
+    """Only the exact copied helper may be retried after its Python PID exits.
+
+    A onefile bootloader may still map that EXE briefly after the inner Python
+    process exits. Windows reports mapped EXEs as access denied (5), sharing
+    violation (32), or lock violation (33). Never change ACLs or attributes.
+    Pure .NET APIs avoid importing incompatible PowerShell Core modules into
+    the system's Windows PowerShell, including Get-FileHash/Wait-Process.
+    """
+    helper, state = Path(helper), Path(state)
+    if (not helper.is_absolute() or not state.is_absolute() or helper.parent != state
+            or not re.fullmatch(r"maintenance-helper-[a-f0-9]{16}\.exe", helper.name)
+            or not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected)
+            or type(size) is not int or not 0 < size <= 256 * 1024 * 1024
+            or type(parent_pid) is not int or parent_pid <= 0):
+        raise ValueError("Invalid copied helper cleanup")
+    quote = lambda value: "'" + str(value).replace("'", "''") + "'"
+    prefix = ("$ErrorActionPreference='Stop'\n$target=[IO.Path]::GetFullPath(" + quote(helper) + ")\n"
+              "$state=[IO.Path]::GetFullPath(" + quote(state) + ")\n$expected=" + quote(expected) + "\n"
+              "$expectedSize=" + str(size) + "\n$parentId=" + str(parent_pid) + "\n")
+    return prefix + r"""
+function Test-OwnedDirectory {
+  if (-not [String]::Equals([IO.Path]::GetDirectoryName($target), $state, [StringComparison]::OrdinalIgnoreCase) -or
+      [IO.Path]::GetFileName($target) -cnotmatch '^maintenance-helper-[a-f0-9]{16}\.exe$') { return $false }
+  $directory = [IO.DirectoryInfo]::new($state)
+  while ($null -ne $directory) {
+    $directory.Refresh()
+    if (-not $directory.Exists -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+    $directory = $directory.Parent
+  }
+  return $true
+}
+function Get-OwnedHelperState {
+  if (-not (Test-OwnedDirectory)) { return 'invalid' }
+  try { $attributes = [IO.File]::GetAttributes($target) } catch {
+    $failure = $_.Exception
+    while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+    if ($failure -is [IO.FileNotFoundException]) { return 'missing' }
+    throw
+  }
+  $file = [IO.FileInfo]::new($target)
+  $file.Refresh()
+  $forbidden = [IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReadOnly
+  if ($file.Length -ne $expectedSize -or ($attributes -band $forbidden) -ne 0) { return 'invalid' }
+  # ShareRead prevents concurrent writing/replacement during the bounded hash.
+  $stream = [IO.File]::Open($target, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try {
+    if ($stream.Length -ne $expectedSize) { return 'invalid' }
+    $actual = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+  } finally { $sha.Dispose(); $stream.Dispose() }
+  if ($actual -cne $expected) { return 'invalid' }
+  return 'owned'
+}
+try {
+  $parent = $null
+  try { $parent = [Diagnostics.Process]::GetProcessById($parentId) } catch {
+    $failure = $_.Exception
+    while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+    if ($failure -isnot [ArgumentException]) { exit 1 }
+  }
+  if ($null -ne $parent) {
+    try { if (-not $parent.WaitForExit(120000)) { exit 1 } } finally { $parent.Dispose() }
+  }
+  $timer = [Diagnostics.Stopwatch]::StartNew()
+  do {
+    try {
+      $proof = Get-OwnedHelperState
+      if ($proof -ceq 'missing') { exit 0 }
+      if ($proof -cne 'owned') { exit 1 }
+      [IO.File]::Delete($target)
+      if ((Get-OwnedHelperState) -ceq 'missing') { exit 0 }
+    } catch {
+      $failure = $_.Exception
+      while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+      $code = $failure.HResult -band 65535
+      if (($failure -isnot [IO.IOException] -and $failure -isnot [UnauthorizedAccessException]) -or
+          $code -notin @(5, 32, 33)) { exit 1 }
+    }
+    if ($timer.ElapsedMilliseconds -ge 20000) { exit 1 }
+    [Threading.Thread]::Sleep(200)
+  } while ($timer.ElapsedMilliseconds -lt 20000)
+} catch { exit 1 }
+exit 1
+"""
+
+
+def launch_cleanup_shell(shell, script):
+    """Launch only the system shell with its own modules and DLL search path."""
     import base64
-    expected = hashlib.sha256(helper.read_bytes()).hexdigest()
-    literal = str(helper).replace("'", "''")
-    script = ("$ErrorActionPreference='Stop'; Wait-Process -Id " + str(os.getpid()) + " -Timeout 120 -ErrorAction SilentlyContinue; "
-        "$target=[IO.Path]::GetFullPath('" + literal + "'); "
-        "if((Test-Path -LiteralPath $target -PathType Leaf) -and ((Get-Item -LiteralPath $target).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 "
-        "-and (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -eq '" + expected + "'){Remove-Item -LiteralPath $target -Force}")
+    import ctypes
+    environment = os.environ.copy()
+    for key in list(environment):
+        if key.casefold() == "psmodulepath":
+            del environment[key]
+    environment["PSMODULEPATH"] = str(shell.parent / "Modules")
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        bundle = Path(bundle).resolve()
+        def outside_bundle(entry):
+            try:
+                return not Path(entry.strip('"')).resolve().is_relative_to(bundle)
+            except (ValueError, OSError):
+                return True
+        environment["PATH"] = os.pathsep.join(entry for entry in environment.get("PATH", "").split(os.pathsep) if outside_bundle(entry))
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetDllDirectoryW.argtypes = [ctypes.c_uint32, ctypes.c_wchar_p]
+    kernel.GetDllDirectoryW.restype = ctypes.c_uint32
+    kernel.SetDllDirectoryW.argtypes = [ctypes.c_wchar_p]
+    kernel.SetDllDirectoryW.restype = ctypes.c_int
+    ctypes.set_last_error(0)
+    length = kernel.GetDllDirectoryW(0, None)
+    if not length and ctypes.get_last_error():
+        raise OSError("Could not read helper DLL search path")
+    if length > 32768:
+        raise ValueError("System shell DLL search path needs review")
+    original = None
+    if length:
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        actual = kernel.GetDllDirectoryW(len(buffer), buffer)
+        if not 0 < actual < len(buffer):
+            raise ValueError("System shell DLL search path changed")
+        original = buffer.value
+    # The maintenance helper is finishing, with no provider/task threads. Clear
+    # only its process-local inherited PyInstaller search directory, then restore
+    # it even if Popen fails. No machine/user environment setting is modified.
+    try:
+        if not kernel.SetDllDirectoryW(None):
+            raise OSError("Could not isolate system shell DLL loading")
+        return subprocess.Popen([str(shell), "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand",
+            base64.b64encode(script.encode("utf-16le")).decode("ascii")], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    finally:
+        if not kernel.SetDllDirectoryW(original):
+            raise OSError("Could not restore helper DLL loading")
+
+
+def cleanup_helper(state):
+    """A bounded system shell removes only this exact copied EXE after exit."""
+    supplied, supplied_state = Path(sys.executable), Path(state)
+    if os.name != "nt" or integration.is_link(supplied) or integration.is_link(supplied_state):
+        return False
+    helper, state = supplied.resolve(), supplied_state.resolve()
+    if helper.parent != state or not re.fullmatch(r"maintenance-helper-[a-f0-9]{16}\.exe", helper.name):
+        return False
+    size = helper.stat().st_size
+    if not 0 < size <= 256 * 1024 * 1024:
+        return False
+    with helper.open("rb") as stream:
+        content = stream.read(size + 1)
+    if len(content) != size:
+        return False
+    script = helper_cleanup_script(helper, state, hashlib.sha256(content).hexdigest(), size, os.getpid())
     shell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-    subprocess.Popen([str(shell), "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand",
-        base64.b64encode(script.encode("utf-16le")).decode("ascii")], stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    launch_cleanup_shell(shell, script)
     return True
 
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## Companion 0.4.2
+
+- Remove the copied Windows maintenance helper after uninstall.
+- Update the version-pinned setup package to 0.4.2.
+
 ## HTTPS 0.17.0
 
 - Offer a version-pinned GitHub bootstrap command when its public release and hash have been verified and configured.
