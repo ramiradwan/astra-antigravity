@@ -223,6 +223,72 @@ class FirstUseTests(unittest.TestCase):
                 first_use.cleanup(state / "absent-root", state, state / "absent-shortcut", self.pins, {})
             self.assertEqual(commands, ["--stop", "wait-pid-123", "--uninstall"])
 
+    def test_cleanup_distinguishes_removed_install_from_retained_or_late_helper(self):
+        # A successful removal receipt can precede disappearance of the onefile
+        # helper. Keep the existing 25-second gate and identify that stage.
+        for helper_eventually_removed in (False, True):
+            with self.subTest(helper_eventually_removed=helper_eventually_removed), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory)
+                (state / "headless-status.json").write_text('{"pid":123}')
+                helper = state / ("maintenance-helper-" + "a" * 16 + ".exe")
+                helper.write_bytes(b"fixture only; never executed")
+                report, waits = {}, []
+                def command(args, _environment):
+                    if args[1] == "--stop":
+                        (state / "headless-status.json").write_text('{"status":"not_running"}')
+                    else:
+                        (state / "maintenance-receipt.json").write_text('{"state":"succeeded","outcome":"removed"}')
+                def wait(predicate, seconds):
+                    waits.append(seconds)
+                    if predicate():
+                        return
+                    if seconds == 25 and helper_eventually_removed:
+                        helper.unlink()
+                        self.assertTrue(predicate())
+                        return
+                    raise first_use.CheckFailed("bounded_state_wait")
+                with patch.object(first_use, "verified_executable", return_value=True), patch.object(first_use, "captured", side_effect=command), \
+                     patch.object(first_use, "wait_pid_exit"), patch.object(first_use, "wait_for", side_effect=wait), \
+                     patch.object(first_use, "registry_exists", return_value=False), patch.object(first_use, "registry_value", return_value=None):
+                    if helper_eventually_removed:
+                        first_use.cleanup(state / "removed-root", state, state / "removed-shortcut", self.pins, {}, report)
+                    else:
+                        with self.assertRaisesRegex(first_use.CheckFailed, "^cleanup_owned_files_removed$"):
+                            first_use.cleanup(state / "removed-root", state, state / "removed-shortcut", self.pins, {}, report)
+                self.assertEqual(waits, [35, 60, 25])
+                for key in ("stop_command_exited", "stop_heartbeat_not_running", "stop_pid_exited", "uninstall_command_exited",
+                            "maintenance_receipt_available", "maintenance_receipt_succeeded", "cleanup_root_removed",
+                            "cleanup_protocol_removed", "cleanup_uninstall_registration_removed", "cleanup_pairing_claim_removed"):
+                    self.assertIs(report[key], True, key)
+                self.assertIs(report["cleanup_helper_removed"], helper_eventually_removed)
+                self.assertIs(report["cleanup_owned_files_removed"], helper_eventually_removed)
+                self.assertNotIn("bounded_state_wait", report)
+                self.assertTrue(all(type(value) is bool for value in report.values()))
+
+    def test_descendant_quiescence_requires_two_fresh_empty_owned_samples(self):
+        for eventually_stopped in (False, True):
+            observer = first_use.Observation()
+            observer.records = [{"pid": 2, "parent": first_use.os.getpid(), "name": "powershell.exe"},
+                                {"sample": True, "running": [2]}]
+            report = {}
+            def wait(predicate, seconds):
+                self.assertEqual(seconds, 20)
+                self.assertFalse(predicate())
+                observer.records += [{"sample": True, "running": [2]}] * 2
+                self.assertFalse(predicate())
+                if eventually_stopped:
+                    observer.records += [{"sample": True, "running": []}] * 2
+                    self.assertTrue(predicate())
+                    return
+                raise first_use.CheckFailed("bounded_state_wait")
+            with patch.object(first_use, "wait_for", side_effect=wait):
+                if eventually_stopped:
+                    first_use.completed_stage(observer.wait_stopped, report, "owned_descendants_stopped")
+                else:
+                    with self.assertRaisesRegex(first_use.CheckFailed, "^owned_descendants_stopped$"):
+                        first_use.completed_stage(observer.wait_stopped, report, "owned_descendants_stopped")
+            self.assertIs(report["owned_descendants_stopped"], eventually_stopped)
+
     def test_main_never_echoes_arbitrary_exception_or_private_state(self):
         for error in (RuntimeError("token=PRIVATE_FIXTURE https://private.invalid/?claim=PRIVATE_FIXTURE"), first_use.CheckFailed("pins_complete")):
             output = io.StringIO()

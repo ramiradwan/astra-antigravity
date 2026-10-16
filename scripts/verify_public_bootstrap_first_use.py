@@ -499,6 +499,22 @@ def wait_for(predicate, seconds):
     raise CheckFailed("bounded_state_wait")
 
 
+def completed_stage(operation, report, check):
+    """Keep bounded operations private but distinguish their fixed stages."""
+    try:
+        result = operation()
+    except CheckFailed as error:
+        report[check] = False
+        if str(error) != "bounded_state_wait":
+            report[str(error)] = False
+        raise CheckFailed(check) from None
+    except Exception:
+        report[check] = False
+        raise CheckFailed(check) from None
+    report[check] = True
+    return result
+
+
 def registry_value(key, name=""):
     import winreg
     try:
@@ -589,24 +605,51 @@ def verify_pairing_output(output, state):
     require(output.splitlines().count(expected) == 1, "pairing_code_returned")
 
 
-def cleanup(root, state, shortcut, pins, environment):
+def cleanup_snapshot(root, state, shortcut, report):
+    # Presence/absence only: never emit a credential, receipt body, path,
+    # registry value, helper basename, process ID or pairing code here.
+    report.update(cleanup_root_removed=not root.exists() and not root.is_symlink(),
+                  cleanup_helper_removed=not bool(list(state.glob("maintenance-helper-*.exe"))),
+                  cleanup_protocol_removed=not registry_exists(PROTOCOL),
+                  cleanup_uninstall_registration_removed=not registry_exists(UNINSTALL),
+                  cleanup_startup_entry_absent=registry_value(RUN, APP_ID) is None,
+                  cleanup_shortcut_removed=not shortcut.exists(),
+                  cleanup_pairing_claim_removed=not (state / "worker/pairing.json").exists(),
+                  cleanup_auth_removed=not (state / "worker/auth.json").exists())
+    report["cleanup_diagnostics_available"] = True
+
+
+def cleanup(root, state, shortcut, pins, environment, report=None):
+    report = {} if report is None else report
     launcher = root / "AstraAntigravity.exe"
     require(verified_executable(launcher, pins), "owned_cleanup_executable")
     heartbeat = state / "headless-status.json"
     pid = json_file(heartbeat).get("pid") if heartbeat.is_file() else None
     # Pending pairing must finish stopping before maintenance can remove files.
-    captured([launcher, "--stop"], environment)
-    wait_for(lambda: heartbeat.is_file() and json_file(heartbeat).get("status") == "not_running", 35)
-    if pid is not None:
-        wait_pid_exit(pid)
-    captured([launcher, "--uninstall"], environment)
-    receipt = state / "maintenance-receipt.json"
-    wait_for(lambda: receipt.is_file() and json_file(receipt).get("state") in ("succeeded", "failed"), 60)
-    require(json_file(receipt).get("state") == "succeeded" and json_file(receipt).get("outcome") == "removed", "supported_uninstall")
-    wait_for(lambda: not root.exists() and not list(state.glob("maintenance-helper-*.exe")), 25)
-    require(not shortcut.exists() and not registry_exists(PROTOCOL) and not registry_exists(UNINSTALL)
-            and registry_value(RUN, APP_ID) is None and not (state / "worker/pairing.json").exists()
-            and not (state / "worker/auth.json").exists(), "install_and_connection_removed")
+    try:
+        completed_stage(lambda: captured([launcher, "--stop"], environment), report, "stop_command_exited")
+        completed_stage(lambda: wait_for(lambda: heartbeat.is_file() and json_file(heartbeat).get("status") == "not_running", 35),
+                        report, "stop_heartbeat_not_running")
+        report["stop_pid_available"] = pid is not None
+        if pid is not None:
+            completed_stage(lambda: wait_pid_exit(pid), report, "stop_pid_exited")
+        completed_stage(lambda: captured([launcher, "--uninstall"], environment), report, "uninstall_command_exited")
+        receipt = state / "maintenance-receipt.json"
+        completed_stage(lambda: wait_for(lambda: receipt.is_file() and json_file(receipt).get("state") in ("succeeded", "failed"), 60),
+                        report, "maintenance_receipt_available")
+        completed_stage(lambda: require(json_file(receipt).get("state") == "succeeded" and json_file(receipt).get("outcome") == "removed",
+                                        "maintenance_receipt_succeeded"), report, "maintenance_receipt_succeeded")
+        completed_stage(lambda: wait_for(lambda: not root.exists() and not root.is_symlink() and not list(state.glob("maintenance-helper-*.exe")), 25),
+                        report, "cleanup_owned_files_removed")
+        cleanup_snapshot(root, state, shortcut, report)
+        completed_stage(lambda: require(all(report[key] for key in ("cleanup_protocol_removed", "cleanup_uninstall_registration_removed",
+                         "cleanup_startup_entry_absent", "cleanup_shortcut_removed", "cleanup_pairing_claim_removed", "cleanup_auth_removed")),
+                         "install_and_connection_removed"), report, "install_and_connection_removed")
+    finally:
+        try:
+            cleanup_snapshot(root, state, shortcut, report)
+        except Exception:
+            report["cleanup_diagnostics_available"] = False  # never replace the primary failure
     # Do not call --status after removal: that command intentionally creates its
     # state folder. Harmless local maintenance history stays on this ephemeral
     # runner. The unapproved relay pairing expires; it is never approved here.
@@ -677,8 +720,8 @@ def verify(report):
             try:
                 if install_attempted:
                     try:
-                        cleanup(root, state, shortcut, pins, environment)
-                        observer.wait_stopped()
+                        cleanup(root, state, shortcut, pins, environment, report)
+                        completed_stage(observer.wait_stopped, report, "owned_descendants_stopped")
                         report["supported_stop_and_uninstall"] = True
                     except Exception:
                         report["supported_stop_and_uninstall"] = False
